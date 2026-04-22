@@ -1,0 +1,44 @@
+use clap::{Parser, Subcommand};
+#[derive(Parser, Debug)]
+#[command(name = "rsh")]
+#[command(about = "Resilient Shell Execution Middleware for AI Agents")]
+#[command(version = "0.1.0")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Run as an MCP server over stdio
+    Mcp,
+    /// Execute a command directly (CLI mode)
+    Exec {
+        #[arg(short = 'c', long)]
+        command: String,
+        #[arg(short = 'C', long)]
+        cwd: Option<String>,
+        #[arg(short = 't', long, default_value_t = 120)]
+        timeout: u64,
+        #[arg(long, default_value_t = true)]
+        retry: bool,
+        #[arg(short = 'E', long, value_parser = parse_key_val)]
+        env: Vec<(String, String)>,
+    },
+    /// Detect and describe the current shell environment
+    Env,
+    /// Compact a file or previous output
+    Compact {
+        #[arg(short, long)]
+        file: Option<String>,
+        #[arg(short, long)]
+        output_id: Option<String>,
+        #[arg(short, long, default_value = "skeleton")]
+        view: String,
+    },
+}
+
+fn parse_key_val(s: &str) -> Result<(String, String), String> {
+    let pos = s.find('=').ok_or_else(|| format!("invalid KEY=value: no `=` found in `{}`", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}

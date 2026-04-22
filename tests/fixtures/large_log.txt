@@ -1,0 +1,21 @@
+INFO 2026-04-21 10:00:01 Starting service
+DEBUG 2026-04-21 10:00:02 Loaded config
+INFO 2026-04-21 10:00:03 Connecting to database
+WARN 2026-04-21 10:00:04 Connection slow, retrying
+INFO 2026-04-21 10:00:05 Retry successful
+ERROR 2026-04-21 10:00:06 Failed to fetch user profile: timeout
+INFO 2026-04-21 10:00:07 Continuing operations
+DEBUG 2026-04-21 10:00:08 Cache miss for key 12345
+INFO 2026-04-21 10:00:09 Processing queue
+WARN 2026-04-21 10:00:10 Queue depth high: 5000
+INFO 2026-04-21 10:00:11 Scaling workers
+ERROR 2026-04-21 10:00:12 Worker crash: out of memory
+INFO 2026-04-21 10:00:13 Restarting worker
+DEBUG 2026-04-21 10:00:14 Worker health check ok
+INFO 2026-04-21 10:00:15 Operations normal
+WARN 2026-04-21 10:00:16 Latency spike detected
+INFO 2026-04-21 10:00:17 Auto-scaling triggered
+ERROR 2026-04-21 10:00:18 Database connection lost
+INFO 2026-04-21 10:00:19 Reconnecting
+DEBUG 2026-04-21 10:00:20 Connection restored
+INFO 2026-04-21 10:00:21 All systems green
