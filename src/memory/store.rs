@@ -1,10 +1,12 @@
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use super::pattern::Pattern;
 use chrono::Utc;
 
+#[derive(Clone)]
 pub struct Store {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Store {
@@ -49,7 +51,7 @@ impl Store {
             )",
             [],
         )?;
-        Ok(Self { conn })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
     pub fn next_output_id(&self) -> String {
@@ -61,7 +63,8 @@ impl Store {
         command_template: &str,
         stderr: &str,
     ) -> anyhow::Result<Option<Pattern>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
             "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
                     fix_command, fix_success_rate, last_used, usage_count
               FROM patterns
@@ -91,7 +94,8 @@ impl Store {
     }
 
     pub fn save_pattern(&self, pattern: &Pattern) -> anyhow::Result<()> {
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "INSERT INTO patterns (command_hash, command_template, recovery_code, stderr_pattern,
                                    fix_command, fix_success_rate, last_used, usage_count)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -123,7 +127,8 @@ impl Store {
         stderr: &str,
         exit_code: i32,
     ) -> anyhow::Result<()> {
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "INSERT INTO outputs (output_id, original_command, stdout, stderr, exit_code)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(output_id) DO UPDATE SET
@@ -136,7 +141,8 @@ impl Store {
     }
 
     pub fn get_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
             "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
              FROM outputs WHERE output_id = ?1"
         )?;
@@ -156,13 +162,12 @@ impl Store {
     }
 
     pub fn previous_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT prior.output_id, prior.original_command, prior.stdout, prior.stderr, prior.exit_code, prior.created_at
-             FROM outputs current
-             JOIN outputs prior
-               ON prior.rowid < current.rowid
-             WHERE current.output_id = ?1
-             ORDER BY prior.rowid DESC
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
+             FROM outputs
+             WHERE rowid < (SELECT rowid FROM outputs WHERE output_id = ?1)
+             ORDER BY rowid DESC
              LIMIT 1"
         )?;
         let mut rows = stmt.query(params![output_id])?;
@@ -181,7 +186,8 @@ impl Store {
     }
 
     pub fn latest_output(&self) -> anyhow::Result<Option<StoredOutput>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
             "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
              FROM outputs ORDER BY created_at DESC, rowid DESC LIMIT 1"
         )?;
@@ -201,8 +207,8 @@ impl Store {
     }
 
     pub fn pattern_count(&self) -> anyhow::Result<i64> {
-        let count = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let count = conn
             .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))?;
         Ok(count)
     }
@@ -212,7 +218,8 @@ impl Store {
         command_template: &str,
         stderr_pattern: &str,
     ) -> anyhow::Result<Option<Pattern>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
             "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
                     fix_command, fix_success_rate, last_used, usage_count
              FROM patterns

@@ -1,10 +1,14 @@
+use once_cell::sync::Lazy;
 use regex::Regex;
+
+static SKELETON_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(\s*)(fn |function |class |struct |mod |pub fn |impl |ERROR|WARN|INFO|DEBUG|TRACE)").unwrap()
+});
 
 pub fn extract_skeleton(text: &str) -> String {
     let mut skeleton = Vec::new();
-    let re = Regex::new(r"^(\s*)(fn |function |class |struct |mod |pub fn |impl |ERROR|WARN|INFO|DEBUG|TRACE)").unwrap();
     for line in text.lines() {
-        if re.is_match(line) {
+        if SKELETON_RE.is_match(line) {
             skeleton.push(line.to_string());
         }
     }

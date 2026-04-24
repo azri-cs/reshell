@@ -40,8 +40,9 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
         }
     }
 
-    let lines: Vec<&str> = output.lines().collect();
-    if lines.len() <= MAX_OUTPUT_LINES {
+    // Count lines first — avoid allocating a Vec of all lines for the common case
+    let line_count = output.lines().count();
+    if line_count <= MAX_OUTPUT_LINES {
         return CompactResult {
             compacted: false,
             content: output.to_string(),
@@ -50,18 +51,30 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
         };
     }
 
-    let head: Vec<&str> = lines.iter().take(50).copied().collect();
-    let tail: Vec<&str> = lines.iter().rev().take(TAIL_LINES).rev().copied().collect();
+    // Collect only head (50 lines) and tail (20 lines) using a ring buffer
+    let mut head: Vec<&str> = Vec::with_capacity(50);
+    let mut tail_ring: std::collections::VecDeque<&str> = std::collections::VecDeque::with_capacity(TAIL_LINES);
+
+    for line in output.lines() {
+        if head.len() < 50 {
+            head.push(line);
+        }
+        if tail_ring.len() == TAIL_LINES {
+            tail_ring.pop_front();
+        }
+        tail_ring.push_back(line);
+    }
+
     let sk = skeleton::extract_skeleton(output);
 
     let mut content = String::new();
-    content.push_str(&format!("[Output truncated: {} lines total]\n", lines.len()));
+    content.push_str(&format!("[Output truncated: {} lines total]\n", line_count));
     content.push_str("--- HEAD (first 50 lines) ---\n");
     content.push_str(&head.join("\n"));
     content.push_str("\n--- SKELETON (structural lines) ---\n");
     content.push_str(&sk);
     content.push_str("\n--- TAIL (last 20 lines) ---\n");
-    content.push_str(&tail.join("\n"));
+    content.push_str(&tail_ring.iter().copied().collect::<Vec<_>>().join("\n"));
 
     CompactResult {
         compacted: true,

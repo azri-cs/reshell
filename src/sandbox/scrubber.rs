@@ -15,11 +15,13 @@ static SECRET_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 });
 
 pub fn scrub_secrets(text: &str) -> String {
-    let mut result = text.to_string();
-    for re in SECRET_PATTERNS.iter() {
-        result = re.replace_all(&result, "${1}[REDACTED]").to_string();
-    }
-    result
+    SECRET_PATTERNS.iter().fold(text.to_string(), |acc, re| {
+        if re.is_match(&acc) {
+            re.replace_all(&acc, "${1}[REDACTED]").to_string()
+        } else {
+            acc
+        }
+    })
 }
 
 #[cfg(test)]

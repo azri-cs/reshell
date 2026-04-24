@@ -21,7 +21,6 @@ impl Runner {
         Ok(Self { store })
     }
 
-    #[cfg(test)]
     pub fn with_store(store: Store) -> Self {
         Self { store }
     }
@@ -51,7 +50,7 @@ impl Runner {
         }
 
         // 2. Execute
-        let detector = Detector::new().await.unwrap_or_default();
+        let detector = Detector::cached().await.clone();
         let shell = detector.execution_shell();
         let retry_shell = detector.recovery_shell();
         let retry_request = retry_shell

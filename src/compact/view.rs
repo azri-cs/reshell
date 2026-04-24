@@ -64,8 +64,10 @@ pub fn render_view(
             let errors: Vec<&str> = output
                 .lines()
                 .filter(|line| {
-                    let upper = line.to_ascii_uppercase();
-                    upper.contains("ERROR") || upper.contains("WARN") || upper.contains("FATAL")
+                    let bytes = line.as_bytes();
+                    bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"ERROR"))
+                        || bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"WARN"))
+                        || bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"FATAL"))
                 })
                 .collect();
 

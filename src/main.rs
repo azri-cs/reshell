@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Env => {
-            let detector = reshell::env::Detector::new().await?;
+            let detector = reshell::env::Detector::cached().await;
             println!("{}", serde_json::to_string_pretty(&detector)?);
         }
         Commands::Compact { file, output_id, view } => {

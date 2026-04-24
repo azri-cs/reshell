@@ -8,7 +8,6 @@ use crate::env::Detector;
 use crate::classify::taxonomy::RecoveryCode;
 use crate::recover::suggest;
 use crate::compact::view::{CompactView, render_view};
-use crate::memory::Store;
 
 use super::server::ServerState;
 
@@ -76,7 +75,7 @@ pub fn list_tools() -> Vec<Value> {
     ]
 }
 
-pub(crate) async fn handle_tool_call(name: &str, arguments: Value, _state: &Arc<Mutex<ServerState>>) -> ToolResponse {
+pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<Mutex<ServerState>>) -> ToolResponse {
     match name {
         "rsh_exec" => {
             let wrapper = match serde_json::from_value::<ExecRequestWrapper>(arguments) {
@@ -95,15 +94,11 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, _state: &Arc<
                 env: wrapper.env.unwrap_or_default(),
                 retry: wrapper.retry.unwrap_or(true),
             };
-            let runner = match Runner::new() {
-                Ok(r) => r,
-                Err(e) => return ToolResponse {
-                    status: "error".to_string(),
-                    error: Some(format!("Failed to initialize runner: {}", e)),
-                    data: None,
-                    is_error: true,
-                },
+            let store = {
+                let s = state.lock().await;
+                s.store.clone()
             };
+            let runner = Runner::with_store(store);
             match runner.run(&req).await {
                 Ok(result) => ToolResponse {
                     status: result.status.clone(),
@@ -120,7 +115,7 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, _state: &Arc<
             }
         }
         "rsh_env" => {
-            let detector = Detector::new().await.unwrap_or_default();
+            let detector = Detector::cached().await.clone();
             ToolResponse {
                 status: "success".to_string(),
                 error: None,
@@ -139,7 +134,7 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, _state: &Arc<
                 },
             };
             let code = parse_recovery_code(&req.recovery_code);
-            let detector = Detector::new().await.unwrap_or_default();
+            let detector = Detector::cached().await.clone();
             let suggestion = suggest::suggest(
                 code,
                 &req.original_command,
@@ -163,14 +158,9 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, _state: &Arc<
                     is_error: true,
                 },
             };
-            let store = match Store::new() {
-                Ok(store) => store,
-                Err(e) => return ToolResponse {
-                    status: "error".to_string(),
-                    error: Some(format!("Failed to open output store: {}", e)),
-                    data: None,
-                    is_error: true,
-                },
+            let store = {
+                let s = state.lock().await;
+                s.store.clone()
             };
             let view = CompactView::parse(req.view.as_deref().unwrap_or("skeleton"));
             if let Some(file_path) = req.file {

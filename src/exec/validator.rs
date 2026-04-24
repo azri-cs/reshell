@@ -1,15 +1,18 @@
+use once_cell::sync::Lazy;
 use regex::Regex;
 
-pub fn validate(command: &str) -> Result<(), String> {
-    let dangerous_patterns = [
+static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
         Regex::new(r"rm\s+-rf\s+/\s*($|\s)").unwrap(),
         Regex::new(r">\s*/dev/sda").unwrap(),
-        Regex::new(r":\(\)\s*\{\s*:\|:\s*&\s*};\s*:").unwrap(),
+        Regex::new(r":\(\)\s*\{\s*:\|:\s*&\s*\};\s*:").unwrap(),
         Regex::new(r"mkfs\.").unwrap(),
         Regex::new(r"dd\s+if=.*of=/dev/[sh]d").unwrap(),
-    ];
+    ]
+});
 
-    for re in &dangerous_patterns {
+pub fn validate(command: &str) -> Result<(), String> {
+    for re in DANGEROUS_PATTERNS.iter() {
         if re.is_match(command) {
             return Err(format!(
                 "Dangerous command blocked by validator: pattern matched `{}`",

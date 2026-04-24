@@ -1,37 +1,47 @@
 # AGENTS.md
 
 ## Start here
-- This is a single-package Rust crate (`Cargo.toml`) that builds one binary: `rsh`. No workspace, repo-local CI, or custom lint/format config was found; use plain Cargo commands.
-- Broad globs will hit generated files under `target/` (already present in the repo). Search `src/`, `tests/`, and `benches/` explicitly, and never edit `target/`.
+- Single-package Rust crate (`Cargo.toml`) → one binary: `rsh`. No workspace, no CI config, no rustfmt/clippy config. Use plain Cargo commands.
+- `target/` is present in the repo. Search `src/`, `tests/`, and `benches/` explicitly; never edit `target/`.
 
-## Real entrypoints
-- `src/main.rs` is the only CLI entrypoint. Subcommands dispatch to:
-  - `mcp` -> `src/mcp/{server,tools}.rs`
-  - `exec` -> `src/exec/{validator,runner}.rs`
-  - `env` -> `src/env/detector.rs`
-  - `compact` -> `src/compact/*`
-- `src/lib.rs` only re-exports modules; there are no additional packages or hidden binaries.
+## Entrypoints
+- `src/main.rs` — CLI entrypoint. Subcommands:
+  - `mcp` → `src/mcp/{server,tools}.rs`
+  - `exec` → `src/exec/{validator,runner}.rs`
+  - `env` → `src/env/detector.rs`
+  - `compact` → `src/compact/*`
+- `src/lib.rs` — re-exports modules only; no additional packages or hidden binaries.
 
 ## Commands you can trust
 - `cargo run -- exec --command "echo hello"`
 - `cargo run -- env`
 - `cargo run -- compact --file tests/fixtures/large_log.txt`
+- `cargo run -- compact --output-id <UUID> --view errors_only`
 - `cargo run -- mcp`
-- `cargo test`
-- `cargo test --test integration_tests`
+- `cargo test` — all tests (unit + integration)
+- `cargo test --test integration_tests` — end-to-end only
 - `cargo test test_cli_exec_echo --test integration_tests -- --exact`
 - `cargo bench --bench compaction_bench`
 
+## Execution model (important)
+- `detector.execution_shell()` is hardcoded to `"sh"` (see `src/env/detector.rs`). Primary execution always uses `sh -c`.
+- **Retry path**: when `--retry` is true (default) and the first attempt classifies as `R25` (environment mismatch), the runner re-executes using `detector.recovery_shell()` — which is `$SHELL` if it's not `sh` (e.g. `/bin/bash`, `/bin/zsh`). See `src/exec/runner.rs` lines 57–85.
+- The retry wraps the command: `<fallback_shell> -c '<original_command>'` via `posix_retry_request`.
+
 ## Trust code over docs
-- `README.md` and `RESHELL_PLAN.md` are ahead of the implementation in a few places; verify behavior in `src/**` before claiming a feature exists.
-- `src/exec/runner.rs` always executes via `sh -c`. Even though the docs discuss Bash/Zsh, current command semantics are POSIX `sh` unless you change the runner.
-- The MCP server is newline-delimited JSON-RPC over stdio (`src/mcp/server.rs` reads `stdin.lines()`), not header-framed stdio MCP. Keep tests/clients aligned unless you upgrade the transport everywhere.
-- `compact` only works from a file today. `output_id` and `view` exist in the CLI/tool schemas but are ignored in `src/main.rs` and `src/mcp/tools.rs`.
-- `retry` is parsed in CLI/tool inputs but unused by `Runner`.
-- Pattern memory is only partially wired: runs create `~/.reshell/patterns.db`, but the hot path currently only calls `save_output`; learned pattern lookup/update is not used.
-- The advertised “safety sandbox” is currently just pre-exec command blocking plus stderr secret scrubbing; `src/sandbox/` does not implement filesystem or network isolation.
+- `README.md` and `RESHELL_PLAN.md` describe features not yet implemented (OverlayFS sandbox, binary output detection, jq-like extraction, SSE transport). Verify against `src/**` before claiming a feature exists.
+- The MCP server is **newline-delimited JSON-RPC over stdio** (`src/mcp/server.rs` reads `stdin.lines()`), not header-framed stdio MCP. Keep tests/clients aligned unless you upgrade the transport.
+- The advertised "safety sandbox" is just pre-exec command blocking + stderr secret scrubbing (`src/sandbox/scrubber.rs`). No filesystem or network isolation exists.
+
+## Pattern memory
+- State lives at `~/.reshell/patterns.db` (SQLite, created automatically via `rusqlite` with bundled feature).
+- On failure, the runner looks up `find_pattern(command_template, stderr)` and reuses learned fixes with `fix_success_rate >= 0.5`.
+- On non-success, non-R10 results where no pattern exists, a new pattern is saved. `save_pattern` upserts by `(command_template, stderr_pattern)` and increments `usage_count`.
 
 ## Testing / state gotchas
-- `tests/integration_tests.rs` is end-to-end: it spawns the built `rsh` binary via `CARGO_BIN_EXE_rsh` and talks to the MCP server over stdio. If you change CLI flags, MCP payloads, or response shapes, update these tests too.
-- Local runs/tests write persistent state to `~/.reshell/patterns.db`; clean that manually if stateful behavior starts affecting a repro.
-- Compaction fixtures live in `tests/fixtures/`.
+- **Integration tests** (`tests/integration_tests.rs`) are end-to-end: they spawn the built `rsh` binary via `CARGO_BIN_EXE_rsh` and talk to the MCP server over stdio. If you change CLI flags, MCP payloads, or response shapes, update these tests.
+- Each integration test calls `unique_home_dir()` to isolate `~/.reshell/patterns.db` into a temp directory — tests should not pollute each other.
+- Unit tests in `src/exec/runner.rs` use `tempfile::tempdir()` for the same reason.
+- If running `cargo run -- exec` manually, state persists at `~/.reshell/patterns.db`; clean it manually if reproducibility matters.
+- Compaction fixtures: `tests/fixtures/{large_log.txt, json_output.txt}`.
+- `insta` (dev-dep) is available for snapshot testing.

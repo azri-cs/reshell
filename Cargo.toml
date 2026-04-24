@@ -11,11 +11,20 @@ name = "rsh"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "fs", "time", "sync"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.30", features = ["bundled", "chrono"] }
+# To use system SQLite (smaller binary, requires libsqlite3-dev):
+# 1. Comment out the line above
+# 2. Uncomment the target-specific sections below:
+#
+# [target.'cfg(all(unix, not(target_env = "musl")))'.dependencies]
+# rusqlite = { version = "0.30", features = ["chrono"] }
+#
+# [target.'cfg(any(windows, target_env = "musl"))'.dependencies]
+# rusqlite = { version = "0.30", features = ["bundled", "chrono"] }
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
@@ -35,3 +44,9 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 [[bench]]
 name = "compaction_bench"
 harness = false
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"
