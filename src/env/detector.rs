@@ -34,18 +34,24 @@ impl Detector {
     }
 
     pub async fn new() -> anyhow::Result<Self> {
-        // Shell and OS detection (sequential — 4 quick probes)
-        let shell = Self::run_cmd("sh", &["-c", "echo $SHELL"]).await.unwrap_or_else(|_| "/bin/sh".to_string());
+        // OS and platform via Rust stdlib (no shell spawn)
+        let os = std::env::consts::OS.to_string();
+        let platform = std::env::consts::ARCH.to_string();
+
+        // Shell detection and version probes run concurrently
+        let (shell, bash_ver, zsh_ver) = tokio::join!(
+            Self::run_cmd("sh", &["-c", "echo $SHELL"]),
+            Self::run_cmd("bash", &["-c", "echo $BASH_VERSION"]),
+            Self::run_cmd("zsh", &["-c", "echo $ZSH_VERSION"]),
+        );
+        let shell = shell.unwrap_or_else(|_| "/bin/sh".to_string());
         let shell_version = if shell.contains("bash") {
-            Self::run_cmd("bash", &["-c", "echo $BASH_VERSION"]).await.ok()
+            bash_ver.ok()
         } else if shell.contains("zsh") {
-            Self::run_cmd("zsh", &["-c", "echo $ZSH_VERSION"]).await.ok()
+            zsh_ver.ok()
         } else {
             None
         };
-
-        let os = Self::run_cmd("uname", &["-s"]).await.unwrap_or_else(|_| "Unknown".to_string());
-        let platform = Self::run_cmd("uname", &["-m"]).await.unwrap_or_else(|_| "unknown".to_string());
         let path = std::env::var("PATH").unwrap_or_default();
         let cwd = std::env::current_dir()?.to_string_lossy().to_string();
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());

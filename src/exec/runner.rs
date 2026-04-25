@@ -7,9 +7,36 @@ use crate::memory::Store;
 use crate::recover::memory::pattern_to_suggestion;
 use crate::recover::suggest;
 use crate::sandbox::scrubber;
+use crate::sandbox::paths;
 use crate::utils::{hash_command, normalize_command, normalize_stderr, shell_quote};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use std::collections::HashSet;
+use once_cell::sync::Lazy;
+
+/// Maximum allowed timeout in seconds (10 minutes).
+const MAX_TIMEOUT_SECS: u64 = 600;
+
+/// Environment variables that must not be injected via the env parameter.
+static BLOCKED_ENV_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
+    HashSet::from([
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "PATH",
+        "SHELL",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "NODE_OPTIONS",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "RUST_LOG",
+        "RUST_BACKTRACE",
+        "IFS",
+    ])
+});
 
 pub struct Runner {
     store: Store,
@@ -72,7 +99,7 @@ impl Runner {
                 retry_request.as_ref().unwrap_or(req)
             };
             let attempt = self.execute_once(current_req, current_shell).await?;
-            let classification = classify(attempt.exit_code, &attempt.stderr, &attempt.stdout, attempt.timed_out);
+            let classification = classify(attempt.exit_code, &attempt.stderr, &attempt.stdout, attempt.timed_out, &detector.shell);
             let should_retry = req.retry
                 && attempt_idx == 0
                 && classification.code == RecoveryCode::R25
@@ -89,25 +116,26 @@ impl Runner {
         let exit_code = attempt.exit_code;
         let timed_out = attempt.timed_out;
 
-        // 3. Scrub secrets from stderr
+        // 3. Scrub secrets from both stderr and stdout
         let scrubbed_stderr = scrubber::scrub_secrets(&stderr);
+        let scrubbed_stdout = scrubber::scrub_secrets(&stdout);
         let normalized_stderr = normalize_stderr(&scrubbed_stderr);
 
         // 4. Classify
-        let classification = classify(exit_code, &scrubbed_stderr, &stdout, timed_out);
+        let classification = classify(exit_code, &scrubbed_stderr, &scrubbed_stdout, timed_out, &detector.shell);
 
         // 5. Compact output
-        let compacted = compact::compact(&stdout, None);
+        let compacted = compact::compact(&scrubbed_stdout, None);
         let final_stdout = if compacted.compacted {
             compacted.content
         } else {
-            stdout
+            scrubbed_stdout
         };
 
         // 6. Recovery suggestion
         let normalized_command = normalize_command(&req.command);
         let memory_pattern = if classification.code != RecoveryCode::R10 {
-            self.store.find_pattern(&normalized_command, &normalized_stderr)?
+            self.store.find_pattern(&normalized_command, &normalized_stderr).await?
         } else {
             None
         };
@@ -132,7 +160,7 @@ impl Runner {
             &final_stdout,
             &scrubbed_stderr,
             exit_code,
-        );
+        ).await;
 
         if classification.code != RecoveryCode::R10 && memory_pattern.is_none() {
             let learned_pattern = Pattern {
@@ -146,7 +174,7 @@ impl Runner {
                 last_used: Some(chrono::Utc::now()),
                 usage_count: 1,
             };
-            let _ = self.store.save_pattern(&learned_pattern);
+            let _ = self.store.save_pattern(&learned_pattern).await;
         }
 
         let status = if classification.code == RecoveryCode::R10 {
@@ -176,13 +204,20 @@ impl Runner {
         let mut cmd = Command::new(shell);
         cmd.arg("-c").arg(&req.command);
         if let Some(cwd) = &req.cwd {
-            cmd.current_dir(cwd);
+            let validated = paths::validate_cwd(cwd).map_err(|e| {
+                anyhow::anyhow!("CWD validation failed: {}", e)
+            })?;
+            cmd.current_dir(validated);
         }
         for (k, v) in &req.env {
+            if BLOCKED_ENV_KEYS.contains(&k.as_str()) {
+                continue; // Silently skip security-sensitive env vars
+            }
             cmd.env(k, v);
         }
 
-        let output_res = timeout(Duration::from_secs(req.timeout), cmd.output()).await;
+        let effective_timeout = req.timeout.min(MAX_TIMEOUT_SECS);
+        let output_res = timeout(Duration::from_secs(effective_timeout), cmd.output()).await;
 
         match output_res {
             Ok(Ok(output)) => Ok(ExecutionAttempt {
@@ -245,7 +280,7 @@ mod tests {
         let result = runner.run(&test_request("nonexistent_command_xyz", false)).await.unwrap();
 
         assert!(result.output_id.is_some());
-        let count = runner.store.pattern_count().unwrap();
+        let count = runner.store.pattern_count().await.unwrap();
         assert_eq!(count, 1);
         let pattern = runner
             .store
@@ -253,6 +288,7 @@ mod tests {
                 &normalize_command("nonexistent_command_xyz"),
                 &normalize_stderr("sh: 1: nonexistent_command_xyz: not found"),
             )
+            .await
             .unwrap()
             .unwrap();
         assert!(pattern.fix_command.is_none());
@@ -274,6 +310,7 @@ mod tests {
                 last_used: Some(chrono::Utc::now()),
                 usage_count: 1,
             })
+            .await
             .unwrap();
         let runner = Runner::with_store(store);
 

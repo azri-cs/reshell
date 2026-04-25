@@ -8,6 +8,7 @@ use crate::env::Detector;
 use crate::classify::taxonomy::RecoveryCode;
 use crate::recover::suggest;
 use crate::compact::view::{CompactView, render_view};
+use crate::sandbox::paths;
 
 use super::server::ServerState;
 
@@ -90,7 +91,7 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
             let req = ExecRequest {
                 command: wrapper.command,
                 cwd: wrapper.cwd,
-                timeout: wrapper.timeout.unwrap_or(120),
+                timeout: wrapper.timeout.unwrap_or(120).min(600),
                 env: wrapper.env.unwrap_or_default(),
                 retry: wrapper.retry.unwrap_or(true),
             };
@@ -164,7 +165,17 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
             };
             let view = CompactView::parse(req.view.as_deref().unwrap_or("skeleton"));
             if let Some(file_path) = req.file {
-                match tokio::fs::read_to_string(&file_path).await {
+                // Validate path is within allowed directory (CWD)
+                let validated = match paths::validate_file_path(&file_path) {
+                    Ok(p) => p,
+                    Err(e) => return ToolResponse {
+                        status: "error".to_string(),
+                        error: Some(format!("Path validation failed: {}", e)),
+                        data: None,
+                        is_error: true,
+                    },
+                };
+                match tokio::fs::read_to_string(&validated).await {
                     Ok(content) => {
                         let compacted = render_view(&content, view, None, None);
                         ToolResponse {
@@ -182,10 +193,10 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                     },
                 }
             } else if let Some(output_id) = req.output_id {
-                match store.get_output(&output_id) {
+                match store.get_output(&output_id).await {
                     Ok(Some(output)) => {
                         let previous = if matches!(view, CompactView::Diff) {
-                            store.previous_output(&output.output_id).ok().flatten().map(|previous| previous.stdout)
+                            store.previous_output(&output.output_id).await.ok().flatten().map(|previous| previous.stdout)
                         } else {
                             None
                         };

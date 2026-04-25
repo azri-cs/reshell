@@ -1,9 +1,6 @@
-use sha2::{Sha256, Digest};
-
 pub fn compute_hash(text: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    hex::encode(hasher.finalize())
+    let hash = xxhash_rust::xxh3::xxh3_64(text.as_bytes());
+    format!("{:016x}", hash)
 }
 
 /// Simple line diff: returns lines present in new but not in old

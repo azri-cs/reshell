@@ -1,7 +1,7 @@
 pub mod patterns;
 pub mod taxonomy;
 
-use patterns::PATTERNS;
+use patterns::{PATTERNS, PATTERN_INDEX};
 use taxonomy::RecoveryCode;
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +11,7 @@ pub struct ClassificationResult {
     pub reason: String,
 }
 
-pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool) -> ClassificationResult {
+pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool, detected_shell: &str) -> ClassificationResult {
     if timed_out {
         return ClassificationResult {
             code: RecoveryCode::R23,
@@ -26,8 +26,9 @@ pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool) ->
         };
     }
 
-    for pattern in PATTERNS.iter() {
-        if pattern.exit_codes.contains(&exit_code) {
+    if let Some(indices) = PATTERN_INDEX.get(&exit_code) {
+        for &idx in indices {
+            let pattern = &PATTERNS[idx];
             for re in &pattern.stderr_regexes {
                 if re.is_match(stderr) {
                     return ClassificationResult {
@@ -40,14 +41,14 @@ pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool) ->
     }
 
     // Fallback heuristics
-    if stderr.contains("bash:") && std::env::var("SHELL").unwrap_or_default().contains("zsh") {
+    if stderr.contains("bash:") && detected_shell.contains("zsh") {
         return ClassificationResult {
             code: RecoveryCode::R25,
             reason: "Possible bashism running in Zsh".to_string(),
         };
     }
 
-    if stderr.contains("zsh:") && std::env::var("SHELL").unwrap_or_default().contains("bash") {
+    if stderr.contains("zsh:") && detected_shell.contains("bash") {
         return ClassificationResult {
             code: RecoveryCode::R25,
             reason: "Possible zsh-ism running in Bash".to_string(),
@@ -66,37 +67,37 @@ mod tests {
 
     #[test]
     fn test_success() {
-        let r = classify(0, "", "", false);
+        let r = classify(0, "", "", false, "");
         assert_eq!(r.code, RecoveryCode::R10);
     }
 
     #[test]
     fn test_command_not_found() {
-        let r = classify(127, "gh: command not found", "", false);
+        let r = classify(127, "gh: command not found", "", false, "");
         assert_eq!(r.code, RecoveryCode::R22);
     }
 
     #[test]
     fn test_syntax_error() {
-        let r = classify(2, "invalid option -- 'z'", "", false);
+        let r = classify(2, "invalid option -- 'z'", "", false, "");
         assert_eq!(r.code, RecoveryCode::R20);
     }
 
     #[test]
     fn test_permission_denied() {
-        let r = classify(126, "Permission denied", "", false);
+        let r = classify(126, "Permission denied", "", false, "");
         assert_eq!(r.code, RecoveryCode::R21);
     }
 
     #[test]
     fn test_subcommand_failure() {
-        let r = classify(1, "npm ERR! code ENOENT", "", false);
+        let r = classify(1, "npm ERR! code ENOENT", "", false, "");
         assert_eq!(r.code, RecoveryCode::R24);
     }
 
     #[test]
     fn test_timeout() {
-        let r = classify(124, "", "", true);
+        let r = classify(124, "", "", true, "");
         assert_eq!(r.code, RecoveryCode::R23);
     }
 }

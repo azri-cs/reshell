@@ -1,9 +1,6 @@
-use sha2::{Sha256, Digest};
-
 pub fn hash_command(command: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(command.as_bytes());
-    hex::encode(hasher.finalize())
+    let hash = xxhash_rust::xxh3::xxh3_64(command.as_bytes());
+    format!("{:016x}", hash)
 }
 
 pub fn is_binary(data: &[u8]) -> bool {

@@ -4,9 +4,16 @@ pub mod view;
 
 use serde::{Deserialize, Serialize};
 use crate::utils::is_binary;
+use once_cell::sync::Lazy;
+use regex::Regex;
 
 const MAX_OUTPUT_LINES: usize = 100;
 const TAIL_LINES: usize = 20;
+
+/// Regex for extracting structural "skeleton" lines (function defs, classes, log levels, etc.)
+static SKELETON_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(\s*)(fn |function |class |struct |mod |pub fn |impl |ERROR|WARN|INFO|DEBUG|TRACE)").unwrap()
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactResult {
@@ -40,8 +47,28 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
         }
     }
 
-    // Count lines first — avoid allocating a Vec of all lines for the common case
-    let line_count = output.lines().count();
+    // Single-pass compaction: count lines, collect head/tail, and extract skeleton
+    // simultaneously instead of 3 separate output.lines() iterations.
+    let mut line_count: usize = 0;
+    let mut head: Vec<&str> = Vec::with_capacity(50);
+    let mut tail_ring: std::collections::VecDeque<&str> =
+        std::collections::VecDeque::with_capacity(TAIL_LINES);
+    let mut skeleton_lines: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        line_count += 1;
+        if head.len() < 50 {
+            head.push(line);
+        }
+        if tail_ring.len() == TAIL_LINES {
+            tail_ring.pop_front();
+        }
+        tail_ring.push_back(line);
+        if SKELETON_RE.is_match(line) {
+            skeleton_lines.push(line.to_string());
+        }
+    }
+
     if line_count <= MAX_OUTPUT_LINES {
         return CompactResult {
             compacted: false,
@@ -51,21 +78,7 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
         };
     }
 
-    // Collect only head (50 lines) and tail (20 lines) using a ring buffer
-    let mut head: Vec<&str> = Vec::with_capacity(50);
-    let mut tail_ring: std::collections::VecDeque<&str> = std::collections::VecDeque::with_capacity(TAIL_LINES);
-
-    for line in output.lines() {
-        if head.len() < 50 {
-            head.push(line);
-        }
-        if tail_ring.len() == TAIL_LINES {
-            tail_ring.pop_front();
-        }
-        tail_ring.push_back(line);
-    }
-
-    let sk = skeleton::extract_skeleton(output);
+    let sk = skeleton_lines.join("\n");
 
     let mut content = String::new();
     content.push_str(&format!("[Output truncated: {} lines total]\n", line_count));

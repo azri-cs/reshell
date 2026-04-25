@@ -1,6 +1,7 @@
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use super::pattern::Pattern;
 use chrono::Utc;
 
@@ -20,7 +21,14 @@ impl Store {
 
     pub fn new_at_path(path: PathBuf) -> anyhow::Result<Self> {
         std::fs::create_dir_all(path.parent().unwrap())?;
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(&path)?;
+        // Performance: WAL mode for concurrent reads, synchronous=NORMAL for speed
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;"
+        )?;
+        Self::set_restrictive_permissions(&path);
         conn.execute(
             "CREATE TABLE IF NOT EXISTS patterns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,22 +66,24 @@ impl Store {
         uuid::Uuid::new_v4().to_string()
     }
 
-    pub fn find_pattern(
+    pub async fn find_pattern(
         &self,
         command_template: &str,
         stderr: &str,
     ) -> anyhow::Result<Option<Pattern>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare_cached(
             "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
                     fix_command, fix_success_rate, last_used, usage_count
-              FROM patterns
-             WHERE command_template = ?1
-             ORDER BY fix_success_rate DESC, usage_count DESC"
+               FROM patterns
+              WHERE command_template = ?1
+                AND (?2 LIKE '%' || stderr_pattern || '%' OR stderr_pattern LIKE '%' || ?2 || '%')
+              ORDER BY fix_success_rate DESC, usage_count DESC
+              LIMIT 1"
         )?;
-        let mut rows = stmt.query(params![command_template])?;
-        while let Some(row) = rows.next()? {
-            let pattern = Pattern {
+        let mut rows = stmt.query(params![command_template, stderr])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Pattern {
                 id: row.get(0)?,
                 command_hash: row.get(1)?,
                 command_template: row.get(2)?,
@@ -83,18 +93,14 @@ impl Store {
                 fix_success_rate: row.get(6)?,
                 last_used: row.get(7)?,
                 usage_count: row.get(8)?,
-            };
-
-            if stderr.contains(&pattern.stderr_pattern) || pattern.stderr_pattern.contains(stderr) {
-                return Ok(Some(pattern));
-            }
+            }))
+        } else {
+            Ok(None)
         }
-
-        Ok(None)
     }
 
-    pub fn save_pattern(&self, pattern: &Pattern) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+    pub async fn save_pattern(&self, pattern: &Pattern) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO patterns (command_hash, command_template, recovery_code, stderr_pattern,
                                    fix_command, fix_success_rate, last_used, usage_count)
@@ -119,7 +125,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn save_output(
+    pub async fn save_output(
         &self,
         output_id: &str,
         original_command: &str,
@@ -127,7 +133,7 @@ impl Store {
         stderr: &str,
         exit_code: i32,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO outputs (output_id, original_command, stdout, stderr, exit_code)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -140,9 +146,9 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+    pub async fn get_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare_cached(
             "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
              FROM outputs WHERE output_id = ?1"
         )?;
@@ -161,9 +167,9 @@ impl Store {
         }
     }
 
-    pub fn previous_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+    pub async fn previous_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare_cached(
             "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
              FROM outputs
              WHERE rowid < (SELECT rowid FROM outputs WHERE output_id = ?1)
@@ -185,9 +191,9 @@ impl Store {
         }
     }
 
-    pub fn latest_output(&self) -> anyhow::Result<Option<StoredOutput>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+    pub async fn latest_output(&self) -> anyhow::Result<Option<StoredOutput>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare_cached(
             "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
              FROM outputs ORDER BY created_at DESC, rowid DESC LIMIT 1"
         )?;
@@ -206,20 +212,20 @@ impl Store {
         }
     }
 
-    pub fn pattern_count(&self) -> anyhow::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+    pub async fn pattern_count(&self) -> anyhow::Result<i64> {
+        let conn = self.conn.lock().await;
         let count = conn
             .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))?;
         Ok(count)
     }
 
-    pub fn find_pattern_exact(
+    pub async fn find_pattern_exact(
         &self,
         command_template: &str,
         stderr_pattern: &str,
     ) -> anyhow::Result<Option<Pattern>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare_cached(
             "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
                     fix_command, fix_success_rate, last_used, usage_count
              FROM patterns
@@ -242,6 +248,20 @@ impl Store {
         } else {
             Ok(None)
         }
+    }
+
+    /// Set 0600 permissions on the database file (owner read/write only).
+    #[cfg(unix)]
+    fn set_restrictive_permissions(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            eprintln!("Warning: failed to set restrictive permissions on database: {}", e);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn set_restrictive_permissions(_path: &std::path::Path) {
+        // Non-Unix: no-op
     }
 }
 

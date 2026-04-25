@@ -6,6 +6,9 @@ use tokio::sync::Mutex;
 use super::tools::{list_tools, handle_tool_call};
 use crate::memory::Store;
 
+/// Maximum allowed size for a single incoming JSON-RPC line (1 MB).
+const MAX_REQUEST_SIZE: usize = 1024 * 1024;
+
 pub struct McpServer {
     state: Arc<Mutex<ServerState>>,
 }
@@ -33,14 +36,24 @@ impl McpServer {
             if line.trim().is_empty() {
                 continue;
             }
+            if line.len() > MAX_REQUEST_SIZE {
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": { "code": -32600, "message": format!("Request too large: {} bytes (max {})", line.len(), MAX_REQUEST_SIZE) }
+                });
+                Self::write_line(&mut stdout, &resp).await?;
+                continue;
+            }
             let req: JsonRpcRequest = match serde_json::from_str(&line) {
                 Ok(r) => r,
                 Err(e) => {
                     let resp = json!({
                         "jsonrpc": "2.0",
                         "id": null,
-                        "error": { "code": -32700, "message": format!("Parse error: {}", e) }
+                        "error": { "code": -32700, "message": "Parse error: invalid JSON-RPC request" }
                     });
+                    let _ = e; // avoid unused variable warning
                     Self::write_line(&mut stdout, &resp).await?;
                     continue;
                 }

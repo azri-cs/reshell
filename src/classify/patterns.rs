@@ -1,5 +1,6 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::collections::HashMap;
 use super::taxonomy::RecoveryCode;
 
 pub struct Pattern {
@@ -56,4 +57,15 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
             ],
         },
     ]
+});
+
+/// Pre-built index: maps exit codes to pattern indices for O(1) lookup.
+pub static PATTERN_INDEX: Lazy<HashMap<i32, Vec<usize>>> = Lazy::new(|| {
+    let mut index: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, pattern) in PATTERNS.iter().enumerate() {
+        for &code in &pattern.exit_codes {
+            index.entry(code).or_default().push(i);
+        }
+    }
+    index
 });
