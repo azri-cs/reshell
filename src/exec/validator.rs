@@ -1,6 +1,9 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use super::analyze;
+use crate::sandbox::allowlist;
+
 static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         // rm -rf variants (any order of r/f, --no-preserve-root, targeting / or /home)
@@ -47,6 +50,12 @@ const INTERACTIVE_COMMANDS: &[&str] = &[
 ];
 
 pub fn validate(command: &str) -> Result<(), String> {
+    // 0. Allowlist mode — if enabled, skip all other checks
+    if let Err(e) = allowlist::is_command_allowed(command) {
+        return Err(e);
+    }
+
+    // 1. Regex-based dangerous pattern detection
     for re in DANGEROUS_PATTERNS.iter() {
         if re.is_match(command) {
             return Err(format!(
@@ -54,6 +63,17 @@ pub fn validate(command: &str) -> Result<(), String> {
                 command
             ));
         }
+    }
+
+    // AST-level structural analysis: catch obfuscated commands
+    // that would bypass regex-based blocking (subshells, eval, heredocs, etc.)
+    let analysis = analyze::analyze(command);
+    if analysis.blocked {
+        return Err(format!(
+            "Obfuscated command blocked by analyzer: {}. Warnings: {}",
+            command,
+            analysis.warnings.join("; ")
+        ));
     }
 
     let first_word = command.split_whitespace().next().unwrap_or("").trim();

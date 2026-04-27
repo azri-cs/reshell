@@ -1,3 +1,4 @@
+pub mod analyze;
 pub mod runner;
 pub mod validator;
 

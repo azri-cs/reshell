@@ -139,6 +139,16 @@ impl Runner {
         // 4. Classify (on normalized stderr for cross-shell compatibility)
         let classification = classify(exit_code, &normalized_stderr, &scrubbed_stdout, timed_out, &detector.shell);
 
+        // 4b. Audit log
+        let _ = self.store.log_audit_entry(
+            &hash_command(&normalize_command(&req.command)),
+            &normalize_command(&req.command),
+            req.cwd.as_deref(),
+            exit_code,
+            &classification.code.to_string(),
+            true, // validation passed
+        ).await;
+
         // 5. Compact output
         let compacted = compact::compact(&scrubbed_stdout, None);
         let final_stdout = if compacted.compacted {

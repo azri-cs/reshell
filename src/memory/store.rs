@@ -74,6 +74,19 @@ impl Store {
             )",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command_hash TEXT NOT NULL,
+                command_template TEXT NOT NULL,
+                cwd TEXT,
+                exit_code INTEGER,
+                recovery_code TEXT,
+                validation_passed BOOLEAN DEFAULT 1,
+                executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -303,6 +316,59 @@ impl Store {
         Ok(results)
     }
 
+    /// Log a command execution for audit purposes.
+    pub async fn log_audit_entry(
+        &self,
+        command_hash: &str,
+        command_template: &str,
+        cwd: Option<&str>,
+        exit_code: i32,
+        recovery_code: &str,
+        validation_passed: bool,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO audit_log (command_hash, command_template, cwd, exit_code, recovery_code, validation_passed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                command_hash,
+                command_template,
+                cwd.unwrap_or(""),
+                exit_code,
+                recovery_code,
+                validation_passed,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get recent audit log entries.
+    pub async fn recent_audit_entries(&self, limit: i64) -> anyhow::Result<Vec<AuditEntry>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, command_hash, command_template, cwd, exit_code, recovery_code,
+                    validation_passed, executed_at
+             FROM audit_log
+             ORDER BY executed_at DESC
+             LIMIT ?1"
+        )?;
+        let mut entries = Vec::new();
+        let mut rows = stmt.query(params![limit])?;
+        while let Some(row) = rows.next()? {
+            entries.push(AuditEntry {
+                id: row.get(0)?,
+                command_hash: row.get(1)?,
+                command_template: row.get(2)?,
+                cwd: row.get(3)?,
+                exit_code: row.get(4)?,
+                recovery_code: row.get(5)?,
+                validation_passed: row.get(6)?,
+                executed_at: row.get(7)?,
+            });
+        }
+        Ok(entries)
+    }
+
     /// Set 0600 permissions on the database file (owner read/write only).
     #[cfg(unix)]
     fn set_restrictive_permissions(path: &std::path::Path) {
@@ -326,4 +392,16 @@ pub struct StoredOutput {
     pub stderr: String,
     pub exit_code: i32,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub command_hash: String,
+    pub command_template: String,
+    pub cwd: Option<String>,
+    pub exit_code: i32,
+    pub recovery_code: String,
+    pub validation_passed: bool,
+    pub executed_at: String,
 }
