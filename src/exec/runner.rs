@@ -8,7 +8,8 @@ use crate::recover::memory::pattern_to_suggestion;
 use crate::recover::suggest;
 use crate::sandbox::scrubber;
 use crate::sandbox::paths;
-use crate::utils::{hash_command, normalize_command, normalize_stderr, shell_quote};
+use crate::classify::normalize::normalize_stderr;
+use crate::utils::{hash_command, normalize_command, shell_quote};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use std::collections::HashSet;
@@ -99,7 +100,8 @@ impl Runner {
                 retry_request.as_ref().unwrap_or(req)
             };
             let attempt = self.execute_once(current_req, current_shell).await?;
-            let classification = classify(attempt.exit_code, &attempt.stderr, &attempt.stdout, attempt.timed_out, &detector.shell);
+            let norm_stderr = normalize_stderr(&attempt.stderr);
+            let classification = classify(attempt.exit_code, &norm_stderr, &attempt.stdout, attempt.timed_out, &detector.shell);
             let should_retry = req.retry
                 && attempt_idx == 0
                 && classification.code == RecoveryCode::R25
@@ -119,10 +121,12 @@ impl Runner {
         // 3. Scrub secrets from both stderr and stdout
         let scrubbed_stderr = scrubber::scrub_secrets(&stderr);
         let scrubbed_stdout = scrubber::scrub_secrets(&stdout);
+
+        // 3b. Normalize stderr for cross-shell classification
         let normalized_stderr = normalize_stderr(&scrubbed_stderr);
 
-        // 4. Classify
-        let classification = classify(exit_code, &scrubbed_stderr, &scrubbed_stdout, timed_out, &detector.shell);
+        // 4. Classify (on normalized stderr for cross-shell compatibility)
+        let classification = classify(exit_code, &normalized_stderr, &scrubbed_stdout, timed_out, &detector.shell);
 
         // 5. Compact output
         let compacted = compact::compact(&scrubbed_stdout, None);
@@ -173,6 +177,7 @@ impl Runner {
                 fix_success_rate: 0.0,
                 last_used: Some(chrono::Utc::now()),
                 usage_count: 1,
+                platform_tag: Some(crate::memory::pattern::current_platform_tag().to_string()),
             };
             let _ = self.store.save_pattern(&learned_pattern).await;
         }
@@ -309,6 +314,7 @@ mod tests {
                 fix_success_rate: 0.9,
                 last_used: Some(chrono::Utc::now()),
                 usage_count: 1,
+                platform_tag: Some("linux".to_string()),
             })
             .await
             .unwrap();

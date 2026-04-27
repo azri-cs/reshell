@@ -12,4 +12,16 @@ pub struct Pattern {
     pub fix_success_rate: f64,
     pub last_used: Option<DateTime<Utc>>,
     pub usage_count: i64,
+    /// Platform where this pattern was observed: "linux", "macos", "windows-wsl", "unknown"
+    pub platform_tag: Option<String>,
+}
+
+/// Returns the current platform tag for pattern storage/lookup.
+pub fn current_platform_tag() -> &'static str {
+    match std::env::consts::OS {
+        "linux" => "linux",
+        "macos" => "macos",
+        "windows" => "windows-wsl",
+        _ => "unknown",
+    }
 }

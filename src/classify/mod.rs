@@ -1,9 +1,26 @@
+pub mod config;
+pub mod normalize;
 pub mod patterns;
 pub mod taxonomy;
 
-use patterns::{PATTERNS, PATTERN_INDEX};
+use patterns::Pattern;
 use taxonomy::RecoveryCode;
 use serde::{Deserialize, Serialize};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+
+/// Merged patterns (user overrides + built-in) with pre-built index.
+static MERGED_PATTERNS: Lazy<(Vec<Pattern>, HashMap<i32, Vec<usize>>)> = Lazy::new(|| {
+    use patterns::PATTERNS;
+    let merged = config::merged_patterns(&PATTERNS);
+    let mut index: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, p) in merged.iter().enumerate() {
+        for &code in &p.exit_codes {
+            index.entry(code).or_default().push(i);
+        }
+    }
+    (merged, index)
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassificationResult {
@@ -11,6 +28,10 @@ pub struct ClassificationResult {
     pub reason: String,
 }
 
+/// Classify a command failure using its exit code, stderr, and shell context.
+///
+/// The `stderr` passed here should already be normalized via
+/// `normalize::normalize_stderr()` for best cross-shell matching.
 pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool, detected_shell: &str) -> ClassificationResult {
     if timed_out {
         return ClassificationResult {
@@ -26,9 +47,10 @@ pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool, de
         };
     }
 
-    if let Some(indices) = PATTERN_INDEX.get(&exit_code) {
+    // Primary: exit-code-indexed pattern matching on (now normalized) stderr
+    if let Some(indices) = MERGED_PATTERNS.1.get(&exit_code) {
         for &idx in indices {
-            let pattern = &PATTERNS[idx];
+            let pattern = &MERGED_PATTERNS.0[idx];
             for re in &pattern.stderr_regexes {
                 if re.is_match(stderr) {
                     return ClassificationResult {
@@ -40,7 +62,23 @@ pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool, de
         }
     }
 
-    // Fallback heuristics
+    // Secondary: shell-agnostic pattern matching (any exit code)
+    if let Some(indices) = MERGED_PATTERNS.1.get(&-1) {
+        for &idx in indices {
+            let pattern = &MERGED_PATTERNS.0[idx];
+            for re in &pattern.stderr_regexes {
+                if re.is_match(stderr) {
+                    return ClassificationResult {
+                        code: pattern.code,
+                        reason: format!("Matched shell-agnostic pattern for {:?}", pattern.code),
+                    };
+                }
+            }
+        }
+    }
+
+    // Fallback heuristics for environment mismatch (R25)
+    // Check raw stderr for shell-specific markers that survived normalization
     if stderr.contains("bash:") && detected_shell.contains("zsh") {
         return ClassificationResult {
             code: RecoveryCode::R25,
@@ -52,6 +90,21 @@ pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool, de
         return ClassificationResult {
             code: RecoveryCode::R25,
             reason: "Possible zsh-ism running in Bash".to_string(),
+        };
+    }
+
+    // Additional R25 heuristics for cross-shell mismatch
+    if stderr.contains("bad substitution") {
+        return ClassificationResult {
+            code: RecoveryCode::R25,
+            reason: "Shell substitution error (possible environment mismatch)".to_string(),
+        };
+    }
+
+    if stderr.contains("no matches found") || stderr.contains("no such word in event") {
+        return ClassificationResult {
+            code: RecoveryCode::R25,
+            reason: "Shell-specific globbing or history expansion error".to_string(),
         };
     }
 

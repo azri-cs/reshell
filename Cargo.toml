@@ -34,6 +34,7 @@ dirs = "5"
 once_cell = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+toml = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"

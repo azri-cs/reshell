@@ -17,7 +17,8 @@ pub fn normalize_command(command: &str) -> String {
 }
 
 pub fn normalize_stderr(stderr: &str) -> String {
-    stderr.trim().to_string()
+    // Delegates to the cross-platform normalizer for consistent behavior.
+    crate::classify::normalize::normalize_stderr(stderr)
 }
 
 pub fn shell_quote(value: &str) -> String {

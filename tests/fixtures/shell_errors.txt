@@ -1,0 +1,20 @@
+# Cross-platform error fixture: one error per line to test stderr normalization.
+# Format: code|error_text|normalized_should_contain
+
+R22|bash: gh: command not found|gh: command not found
+R22|zsh: command not found: gh|command not found: gh
+R22|fish: Unknown command: gh|command not found: gh
+R22|dash: 1: gh: not found|gh: command not found
+R22|sh: 1: foo: not found|foo: not found
+R22|'pwsh' is not recognized as an internal or external command, operable program or batch file.|command not found
+R21|bash: /usr/local/bin/tool: Permission denied|Permission denied
+R21|zsh: permission denied: /usr/local/bin/tool|Permission denied
+R21|fish: Permission denied|Permission denied
+R20|bash: syntax error near unexpected token `fi'|syntax error
+R20|zsh: parse error near `}'|syntax error
+R20|dash: 1: Syntax error: "(" unexpected|syntax error
+R24|npm ERR! code ENOENT|npm ERR!
+R24|cargo: error[E0432]: unresolved import `foo`|error[E0432]
+R24|make: *** [build] Error 2|make: ***
+R25|bash: ${!indirect}: bad substitution|bad substitution
+R25|zsh: no matches found: *.txt|no matches found

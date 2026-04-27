@@ -2,7 +2,7 @@ use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use super::pattern::Pattern;
+use super::pattern::{Pattern, current_platform_tag};
 use chrono::Utc;
 
 #[derive(Clone)]
@@ -39,10 +39,13 @@ impl Store {
                 fix_command TEXT,
                 fix_success_rate REAL DEFAULT 0.0,
                 last_used TIMESTAMP,
-                usage_count INTEGER DEFAULT 1
+                usage_count INTEGER DEFAULT 1,
+                platform_tag TEXT DEFAULT 'unknown'
             )",
             [],
         )?;
+        // Migration: add platform_tag column if missing from older DBs
+        let _ = conn.execute("ALTER TABLE patterns ADD COLUMN platform_tag TEXT DEFAULT 'unknown'", []);
         let _ = conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_template_stderr
              ON patterns(command_template, stderr_pattern)",
@@ -72,16 +75,17 @@ impl Store {
         stderr: &str,
     ) -> anyhow::Result<Option<Pattern>> {
         let conn = self.conn.lock().await;
+        let platform = current_platform_tag();
         let mut stmt = conn.prepare_cached(
             "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
-                    fix_command, fix_success_rate, last_used, usage_count
+                    fix_command, fix_success_rate, last_used, usage_count, platform_tag
                FROM patterns
               WHERE command_template = ?1
                 AND (?2 LIKE '%' || stderr_pattern || '%' OR stderr_pattern LIKE '%' || ?2 || '%')
-              ORDER BY fix_success_rate DESC, usage_count DESC
+              ORDER BY (platform_tag = ?3) DESC, fix_success_rate DESC, usage_count DESC
               LIMIT 1"
         )?;
-        let mut rows = stmt.query(params![command_template, stderr])?;
+        let mut rows = stmt.query(params![command_template, stderr, platform])?;
         if let Some(row) = rows.next()? {
             Ok(Some(Pattern {
                 id: row.get(0)?,
@@ -93,6 +97,7 @@ impl Store {
                 fix_success_rate: row.get(6)?,
                 last_used: row.get(7)?,
                 usage_count: row.get(8)?,
+                platform_tag: row.get(9)?,
             }))
         } else {
             Ok(None)
@@ -103,14 +108,15 @@ impl Store {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO patterns (command_hash, command_template, recovery_code, stderr_pattern,
-                                   fix_command, fix_success_rate, last_used, usage_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                   fix_command, fix_success_rate, last_used, usage_count, platform_tag)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
               ON CONFLICT(command_template, stderr_pattern) DO UPDATE SET
                  recovery_code = excluded.recovery_code,
                  fix_command = excluded.fix_command,
                  fix_success_rate = excluded.fix_success_rate,
                  last_used = excluded.last_used,
-                 usage_count = usage_count + 1",
+                 usage_count = usage_count + 1,
+                 platform_tag = excluded.platform_tag",
             params![
                 &pattern.command_hash,
                 &pattern.command_template,
@@ -120,6 +126,7 @@ impl Store {
                 pattern.fix_success_rate,
                 Utc::now().to_rfc3339(),
                 pattern.usage_count,
+                pattern.platform_tag.as_deref().unwrap_or("unknown"),
             ],
         )?;
         Ok(())
@@ -227,7 +234,7 @@ impl Store {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare_cached(
             "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
-                    fix_command, fix_success_rate, last_used, usage_count
+                    fix_command, fix_success_rate, last_used, usage_count, platform_tag
              FROM patterns
              WHERE command_template = ?1 AND stderr_pattern = ?2
              LIMIT 1"
@@ -244,6 +251,7 @@ impl Store {
                 fix_success_rate: row.get(6)?,
                 last_used: row.get(7)?,
                 usage_count: row.get(8)?,
+                platform_tag: row.get(9)?,
             }))
         } else {
             Ok(None)

@@ -41,6 +41,7 @@ mod tests {
             fix_success_rate: 0.9,
             last_used: Some(Utc::now()),
             usage_count: 3,
+            platform_tag: Some("linux".to_string()),
         };
 
         let suggestion = pattern_to_suggestion(&pattern, "cargo test");
