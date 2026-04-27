@@ -89,7 +89,8 @@ impl McpServer {
                     "serverInfo": {
                         "name": "reshell",
                         "version": "0.1.0"
-                    }
+                    },
+                    "instructions": "Reshell provides resilient shell execution with automatic failure classification and recovery. Always use rsh_exec instead of raw bash for any command that might fail. When rsh_exec returns status='failed', call rsh_recover with the returned recovery_code and original_command to get a deterministic fix suggestion (or use the next_action field for ready-to-use parameters). When output is truncated (truncated=true), use rsh_compact with the returned output_id and view='skeleton' for a structural summary. Start a session with rsh_check to verify the pipeline and get usage guidance."
                 }
             }));
         }

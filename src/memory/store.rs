@@ -62,6 +62,18 @@ impl Store {
             )",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS recovery_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern_id INTEGER,
+                recovery_code TEXT,
+                original_command TEXT,
+                suggested_action TEXT,
+                attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pattern_id) REFERENCES patterns(id)
+            )",
+            [],
+        )?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -256,6 +268,39 @@ impl Store {
         } else {
             Ok(None)
         }
+    }
+
+    /// Log a recovery suggestion being served to the agent.
+    pub async fn log_recovery_attempt(
+        &self,
+        recovery_code: &str,
+        original_command: &str,
+        suggested_action: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO recovery_attempts (recovery_code, original_command, suggested_action)
+             VALUES (?1, ?2, ?3)",
+            params![recovery_code, original_command, suggested_action],
+        )?;
+        Ok(())
+    }
+
+    /// Count recovery attempts grouped by recovery code (for diagnostics).
+    pub async fn recovery_attempt_counts(&self) -> anyhow::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare_cached(
+            "SELECT recovery_code, COUNT(*) as cnt
+             FROM recovery_attempts
+             GROUP BY recovery_code
+             ORDER BY cnt DESC"
+        )?;
+        let mut results = Vec::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            results.push((row.get(0)?, row.get(1)?));
+        }
+        Ok(results)
     }
 
     /// Set 0600 permissions on the database file (owner read/write only).

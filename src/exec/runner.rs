@@ -1,4 +1,4 @@
-use super::{ExecRequest, ExecResult, OutputInfo, validator};
+use super::{ExecRequest, ExecResult, OutputInfo, NextAction, CompactionHint, validator};
 use crate::classify::{classify, taxonomy::RecoveryCode};
 use crate::compact;
 use crate::env::Detector;
@@ -70,10 +70,21 @@ impl Runner {
                 ))?,
                 output: OutputInfo {
                     stdout: String::new(),
-                    stderr: e,
+                    stderr: e.clone(),
                     exit_code: -1,
                     truncated: false,
                 },
+                next_action: Some(NextAction {
+                    tool: "rsh_recover".to_string(),
+                    params: serde_json::json!({
+                        "recovery_code": "R30",
+                        "original_command": req.command,
+                        "context": e,
+                    }),
+                    reason: "Command blocked by safety validator. Use rsh_recover for an alternative approach.".to_string(),
+                }),
+                compaction_hint: None,
+                platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
             });
         }
 
@@ -189,6 +200,40 @@ impl Runner {
         }
         .to_string();
 
+        // Build next_action hint so the agent knows exactly which tool to call next
+        let next_action = if classification.code != RecoveryCode::R10 {
+            Some(NextAction {
+                tool: "rsh_recover".to_string(),
+                params: serde_json::json!({
+                    "recovery_code": classification.code.to_string(),
+                    "original_command": req.command,
+                    "context": classification.reason,
+                }),
+                reason: format!(
+                    "Command failed with {}. Use rsh_recover to get a deterministic fix suggestion.",
+                    classification.code.class_name()
+                ),
+            })
+        } else {
+            None
+        };
+
+        // Build compaction_hint if output was truncated
+        let compaction_hint = if compacted.compacted {
+            Some(CompactionHint {
+                tool: "rsh_compact".to_string(),
+                params: serde_json::json!({
+                    "output_id": output_id,
+                    "view": "skeleton",
+                }),
+                reason: "Output was truncated to stay within context limits. Use rsh_compact with view='skeleton' for a structural summary, view='diff' to see changes, or view='errors_only' to see only error/warning lines.".to_string(),
+            })
+        } else {
+            None
+        };
+
+        let platform_tag = crate::memory::pattern::current_platform_tag().to_string();
+
         Ok(ExecResult {
             status,
             recovery_code: classification.code.to_string(),
@@ -202,6 +247,9 @@ impl Runner {
                 exit_code,
                 truncated: compacted.compacted,
             },
+            next_action,
+            compaction_hint,
+            platform: Some(platform_tag),
         })
     }
 

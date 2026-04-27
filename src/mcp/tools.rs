@@ -27,22 +27,22 @@ pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "rsh_exec",
-            "description": "Execute a shell command with resilient failure handling",
+            "description": "Execute a shell command with automatic failure classification, secret scrubbing, and recovery suggestions. PREFER THIS over raw bash for any command that might fail. When this returns status='failed', check the next_action field for the recovery tool to call, or use rsh_recover with the returned recovery_code and original_command. When output is truncated (truncated=true), use rsh_compact with the returned output_id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The shell command to execute" },
                     "cwd": { "type": "string", "description": "Working directory" },
-                    "timeout": { "type": "integer", "default": 120 },
+                    "timeout": { "type": "integer", "default": 120, "description": "Maximum execution time in seconds (capped at 600)" },
                     "env": { "type": "object", "additionalProperties": { "type": "string" } },
-                    "retry": { "type": "boolean", "default": true }
+                    "retry": { "type": "boolean", "default": true, "description": "Automatically retry with a fallback shell on environment mismatch (R25)" }
                 },
                 "required": ["command"]
             }
         }),
         json!({
             "name": "rsh_env",
-            "description": "Detect and describe the current shell environment",
+            "description": "Detect and describe the current shell environment: OS, shell type/version, available dev tools, package manager. Call this at the start of a session to understand the target environment before running commands.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -50,27 +50,35 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "rsh_recover",
-            "description": "Apply a deterministic recovery strategy for a known failure",
+            "description": "Get a deterministic recovery strategy for a known failure. CALL THIS when rsh_exec returns status='failed' with a recovery_code other than R10. Pass the recovery_code and original_command from the rsh_exec response (or use the next_action field which provides ready-to-use parameters).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "recovery_code": { "type": "string" },
-                    "original_command": { "type": "string" },
-                    "context": { "type": "string" }
+                    "recovery_code": { "type": "string", "description": "Recovery code from rsh_exec response (R20-R30)" },
+                    "original_command": { "type": "string", "description": "The command that failed (from rsh_exec original_command)" },
+                    "context": { "type": "string", "description": "Optional additional context about the failure" }
                 },
                 "required": ["recovery_code", "original_command"]
             }
         }),
         json!({
             "name": "rsh_compact",
-            "description": "Retrieve a compacted view of a previously stored large output or a file",
+            "description": "Retrieve a compacted view of a previously stored large output. Use when rsh_exec returns truncated=true or when inspecting previous command outputs. Views: 'skeleton' (structural summary — function defs, error/warn lines, class/struct defs), 'diff' (only new lines since previous read), 'errors_only' (only ERROR/WARN/FATAL lines), 'full' (complete output).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "output_id": { "type": "string" },
-                    "file": { "type": "string" },
-                    "view": { "type": "string", "enum": ["full", "skeleton", "diff", "errors_only"] }
+                    "output_id": { "type": "string", "description": "The output_id from a previous rsh_exec response" },
+                    "file": { "type": "string", "description": "Path to a file to compact (must be within working directory)" },
+                    "view": { "type": "string", "enum": ["full", "skeleton", "diff", "errors_only"], "default": "skeleton", "description": "Compaction view to apply" }
                 }
+            }
+        }),
+        json!({
+            "name": "rsh_check",
+            "description": "Quick health check and onboarding guide. Call this at the start of a session to verify reshell is functioning and to get usage guidance for the recovery pipeline (rsh_exec → rsh_recover → rsh_compact).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
             }
         }),
     ]
@@ -124,6 +132,51 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                 is_error: false,
             }
         }
+        "rsh_check" => {
+            let detector = Detector::cached().await.clone();
+            let store = {
+                let s = state.lock().await;
+                s.store.clone()
+            };
+            let pattern_count = store.pattern_count().await.unwrap_or(0);
+
+            let guidance = json!({
+                "status": "healthy",
+                "environment": {
+                    "os": detector.os,
+                    "shell": detector.shell,
+                    "package_manager": detector.package_manager,
+                },
+                "usage": {
+                    "workflow": "rsh_exec → on failure check next_action → call rsh_recover → rsh_exec (retry with fix)",
+                    "tools": {
+                        "rsh_exec": "Execute commands with automatic failure classification and recovery hints. Always use this instead of raw bash.",
+                        "rsh_recover": "Call when rsh_exec returns status='failed'. Pass recovery_code and original_command from the response.",
+                        "rsh_compact": "Call when rsh_exec returns truncated=true. Use the output_id from the response with view='skeleton' for structural summary.",
+                        "rsh_env": "Detect OS, shell, available dev tools, and package manager. Call at session start.",
+                        "rsh_check": "This tool — verify reshell is working and get usage guidance."
+                    },
+                    "recovery_codes": {
+                        "R10": "Success — no action needed.",
+                        "R20": "Syntax Error — check --help for correct flags.",
+                        "R21": "Permission Denied — try with sudo or fix file permissions.",
+                        "R22": "Command Not Found — install the missing tool via package manager.",
+                        "R23": "Timeout — increase timeout or run in smaller chunks.",
+                        "R24": "Subcommand Failure — run diagnostic command to investigate.",
+                        "R25": "Environment Mismatch — use POSIX-compatible syntax. rsh will auto-retry with fallback shell.",
+                        "R26": "Output Overflow — use rsh_compact to get a compacted view.",
+                        "R30": "Fatal/Unknown — requires human escalation."
+                    }
+                },
+                "learned_patterns": pattern_count,
+            });
+            ToolResponse {
+                status: "success".to_string(),
+                error: None,
+                data: Some(guidance),
+                is_error: false,
+            }
+        }
         "rsh_recover" => {
             let req = match serde_json::from_value::<RecoverRequest>(arguments) {
                 Ok(r) => r,
@@ -142,6 +195,17 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                 &req.context.unwrap_or_default(),
                 &detector,
             );
+
+            // Log telemetry
+            {
+                let s = state.lock().await;
+                let _ = s.store.log_recovery_attempt(
+                    &req.recovery_code,
+                    &req.original_command,
+                    &suggestion.action,
+                ).await;
+            }
+
             ToolResponse {
                 status: "success".to_string(),
                 error: None,
