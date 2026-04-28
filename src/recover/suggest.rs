@@ -113,3 +113,143 @@ fn diagnostic_for_tool(command: &str) -> Option<String> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_detector() -> Detector {
+        Detector::default()
+    }
+
+    #[test]
+    fn r10_suggests_none() {
+        let s = suggest(RecoveryCode::R10, "ls", "", &default_detector());
+        assert_eq!(s.action, "none");
+        assert!(s.command.is_none());
+        assert_eq!(s.confidence, "high");
+    }
+
+    #[test]
+    fn r20_suggests_help() {
+        let s = suggest(RecoveryCode::R20, "grep --bad-flag foo", "", &default_detector());
+        assert_eq!(s.action, "check_usage");
+        assert_eq!(s.command.as_deref(), Some("grep --help"));
+        assert_eq!(s.confidence, "high");
+    }
+
+    #[test]
+    fn r21_suggests_sudo_simple_command() {
+        let s = suggest(RecoveryCode::R21, "cat /etc/shadow", "", &default_detector());
+        assert_eq!(s.action, "fix_permissions");
+        assert_eq!(s.command.as_deref(), Some("sudo cat /etc/shadow"));
+        assert_eq!(s.confidence, "medium");
+    }
+
+    #[test]
+    fn r21_sanitizes_command_with_operators() {
+        let s = suggest(RecoveryCode::R21, "cat /root/file; rm -rf /", "", &default_detector());
+        assert_eq!(s.action, "fix_permissions");
+        // Should only suggest sudo for the first word, not the full dangerous command
+        assert_eq!(s.command.as_deref(), Some("sudo cat"));
+    }
+
+    #[test]
+    fn r22_suggests_install() {
+        let mut detector = default_detector();
+        detector.package_manager = Some("apt".to_string());
+        let s = suggest(RecoveryCode::R22, "gh pr view", "", &detector);
+        assert_eq!(s.action, "install_missing_tool");
+        assert!(s.command.as_deref().unwrap().contains("gh"));
+        assert_eq!(s.confidence, "high");
+    }
+
+    #[test]
+    fn r22_no_package_manager() {
+        let s = suggest(RecoveryCode::R22, "gh pr view", "", &default_detector());
+        assert_eq!(s.action, "install_missing_tool");
+        assert!(s.command.is_none());
+        assert_eq!(s.confidence, "medium");
+    }
+
+    #[test]
+    fn r23_suggests_chunked() {
+        let s = suggest(RecoveryCode::R23, "long-running-task", "", &default_detector());
+        assert_eq!(s.action, "chunked_execution");
+        assert!(s.command.is_none());
+        assert_eq!(s.confidence, "medium");
+    }
+
+    #[test]
+    fn r24_suggests_diagnostic_npm() {
+        let s = suggest(RecoveryCode::R24, "npm install", "", &default_detector());
+        assert_eq!(s.action, "run_diagnostic");
+        assert_eq!(s.command.as_deref(), Some("npm ls"));
+    }
+
+    #[test]
+    fn r24_suggests_diagnostic_cargo() {
+        let s = suggest(RecoveryCode::R24, "cargo build", "", &default_detector());
+        assert_eq!(s.action, "run_diagnostic");
+        assert_eq!(s.command.as_deref(), Some("cargo check"));
+    }
+
+    #[test]
+    fn r24_no_diagnostic_for_unknown_tool() {
+        let s = suggest(RecoveryCode::R24, "unknown-tool build", "", &default_detector());
+        assert_eq!(s.action, "run_diagnostic");
+        assert!(s.command.is_none());
+    }
+
+    #[test]
+    fn r25_suggests_posix() {
+        let s = suggest(RecoveryCode::R25, "echo ${!var}", "", &default_detector());
+        assert_eq!(s.action, "use_posix");
+        assert!(s.command.is_none());
+        assert_eq!(s.confidence, "medium");
+    }
+
+    #[test]
+    fn r26_suggests_scoping() {
+        let s = suggest(RecoveryCode::R26, "find / -name '*.log'", "", &default_detector());
+        assert_eq!(s.action, "scope_output");
+        assert_eq!(s.command.as_deref(), Some("find / -name '*.log' | head -n 50"));
+        assert_eq!(s.confidence, "high");
+    }
+
+    #[test]
+    fn r27_suggests_rewrite() {
+        let s = suggest(RecoveryCode::R27, "rm -rf /", "", &default_detector());
+        assert_eq!(s.action, "rewrite_command");
+        assert!(s.command.is_none());
+        assert_eq!(s.confidence, "high");
+    }
+
+    #[test]
+    fn r30_suggests_escalate() {
+        let s = suggest(RecoveryCode::R30, "mystery-command", "", &default_detector());
+        assert_eq!(s.action, "escalate");
+        assert!(s.command.is_none());
+        assert_eq!(s.confidence, "low");
+    }
+
+    #[test]
+    fn contains_shell_operators_detects_pipe() {
+        assert!(contains_shell_operators("ls | grep foo"));
+    }
+
+    #[test]
+    fn contains_shell_operators_detects_semicolon() {
+        assert!(contains_shell_operators("ls; rm -rf /"));
+    }
+
+    #[test]
+    fn contains_shell_operators_detects_and() {
+        assert!(contains_shell_operators("make && make install"));
+    }
+
+    #[test]
+    fn contains_shell_operators_clean_command() {
+        assert!(!contains_shell_operators("cat /etc/passwd"));
+    }
+}

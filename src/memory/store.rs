@@ -405,3 +405,143 @@ pub struct AuditEntry {
     pub validation_passed: bool,
     pub executed_at: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn test_store() -> (Store, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = Store::new_at_path(db_path).unwrap();
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn save_and_get_output() {
+        let (store, _dir) = test_store();
+        let id = store.next_output_id();
+        store.save_output(&id, "echo hello", "hello\n", "", 0).await.unwrap();
+        let output = store.get_output(&id).await.unwrap().unwrap();
+        assert_eq!(output.stdout, "hello\n");
+        assert_eq!(output.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_output() {
+        let (store, _dir) = test_store();
+        let result = store.get_output("nonexistent-id").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn save_and_find_pattern() {
+        let (store, _dir) = test_store();
+        let pattern = Pattern {
+            id: None,
+            command_hash: "abc123".to_string(),
+            command_template: "cargo test".to_string(),
+            recovery_code: "R24".to_string(),
+            stderr_pattern: "FAILED".to_string(),
+            fix_command: Some("cargo test -- --nocapture".to_string()),
+            fix_success_rate: 0.8,
+            last_used: Some(Utc::now()),
+            usage_count: 1,
+            platform_tag: Some("linux".to_string()),
+        };
+        store.save_pattern(&pattern).await.unwrap();
+        let found = store.find_pattern("cargo test", "test FAILED").await.unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.recovery_code, "R24");
+        assert_eq!(found.fix_command, Some("cargo test -- --nocapture".to_string()));
+    }
+
+    #[tokio::test]
+    async fn pattern_count_starts_at_zero() {
+        let (store, _dir) = test_store();
+        assert_eq!(store.pattern_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn pattern_count_increments() {
+        let (store, _dir) = test_store();
+        let pattern = Pattern {
+            id: None,
+            command_hash: "abc".to_string(),
+            command_template: "npm install".to_string(),
+            recovery_code: "R24".to_string(),
+            stderr_pattern: "npm ERR!".to_string(),
+            fix_command: None,
+            fix_success_rate: 0.0,
+            last_used: Some(Utc::now()),
+            usage_count: 1,
+            platform_tag: Some("linux".to_string()),
+        };
+        store.save_pattern(&pattern).await.unwrap();
+        assert_eq!(store.pattern_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn log_audit_entry_works() {
+        let (store, _dir) = test_store();
+        store.log_audit_entry("hash123", "echo hello", Some("/tmp"), 0, "R10", true).await.unwrap();
+        let entries = store.recent_audit_entries(10).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].recovery_code, "R10");
+    }
+
+    #[tokio::test]
+    async fn log_recovery_attempt_works() {
+        let (store, _dir) = test_store();
+        store.log_recovery_attempt("R22", "gh pr view", "install gh").await.unwrap();
+        let counts = store.recovery_attempt_counts().await.unwrap();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].0, "R22");
+        assert_eq!(counts[0].1, 1);
+    }
+
+    #[tokio::test]
+    async fn latest_output_returns_most_recent() {
+        let (store, _dir) = test_store();
+        let id1 = store.next_output_id();
+        store.save_output(&id1, "first", "out1", "", 0).await.unwrap();
+        let id2 = store.next_output_id();
+        store.save_output(&id2, "second", "out2", "", 0).await.unwrap();
+        let latest = store.latest_output().await.unwrap().unwrap();
+        assert_eq!(latest.stdout, "out2");
+    }
+
+    #[tokio::test]
+    async fn previous_output_returns_prior() {
+        let (store, _dir) = test_store();
+        let id1 = store.next_output_id();
+        store.save_output(&id1, "first", "out1", "", 0).await.unwrap();
+        let id2 = store.next_output_id();
+        store.save_output(&id2, "second", "out2", "", 0).await.unwrap();
+        let prev = store.previous_output(&id2).await.unwrap().unwrap();
+        assert_eq!(prev.stdout, "out1");
+    }
+
+    #[tokio::test]
+    async fn save_pattern_upserts() {
+        let (store, _dir) = test_store();
+        let pattern = Pattern {
+            id: None,
+            command_hash: "abc".to_string(),
+            command_template: "cargo test".to_string(),
+            recovery_code: "R24".to_string(),
+            stderr_pattern: "FAILED".to_string(),
+            fix_command: None,
+            fix_success_rate: 0.0,
+            last_used: Some(Utc::now()),
+            usage_count: 1,
+            platform_tag: Some("linux".to_string()),
+        };
+        store.save_pattern(&pattern).await.unwrap();
+        store.save_pattern(&pattern).await.unwrap();
+        // Should still be 1 pattern (upsert), but usage_count incremented
+        assert_eq!(store.pattern_count().await.unwrap(), 1);
+    }
+}

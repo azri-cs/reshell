@@ -292,3 +292,99 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
     let diff_result: Value = serde_json::from_str(&String::from_utf8_lossy(&diff.stdout)).unwrap();
     assert_eq!(diff_result["content"], "line3");
 }
+
+#[tokio::test]
+async fn test_mcp_rsh_check() {
+    let home = unique_home_dir();
+    let mut child = Command::new(rsh_bin())
+        .args(["mcp"])
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn MCP server");
+
+    let stdin = child.stdin.take().expect("Failed to open stdin");
+    let stdout = child.stdout.take().expect("Failed to open stdout");
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = reader.lines();
+    let mut stdin = stdin;
+
+    // Initialize
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "test", "version": "1.0" } }
+    });
+    stdin.write_all(format!("{}\n", init).as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+    let _ = lines.next_line().await; // init response
+
+    let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    stdin.write_all(format!("{}\n", note).as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+
+    // Call rsh_check
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": "rsh_check",
+            "arguments": {}
+        }
+    });
+    stdin.write_all(format!("{}\n", call).as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+
+    let line = lines.next_line().await.unwrap().expect("No response");
+    let resp: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["id"], 5);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let inner: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(inner["status"], "success");
+    assert_eq!(inner["data"]["status"], "healthy");
+    assert!(inner["data"]["environment"]["os"].as_str().is_some());
+    assert!(inner["data"]["usage"]["workflow"].as_str().is_some());
+    assert!(inner["data"]["usage"]["recovery_codes"]["R27"].as_str().is_some());
+
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_jsonrpc_version_validation() {
+    let home = unique_home_dir();
+    let mut child = Command::new(rsh_bin())
+        .args(["mcp"])
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn MCP server");
+
+    let stdin = child.stdin.take().expect("Failed to open stdin");
+    let stdout = child.stdout.take().expect("Failed to open stdout");
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = reader.lines();
+    let mut stdin = stdin;
+
+    // Send request with invalid jsonrpc version
+    let bad_req = json!({
+        "jsonrpc": "1.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    });
+    stdin.write_all(format!("{}\n", bad_req).as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+
+    let line = lines.next_line().await.unwrap().expect("No response");
+    let resp: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["error"]["code"], -32600);
+    assert!(resp["error"]["message"].as_str().unwrap().contains("jsonrpc"));
+
+    let _ = child.kill().await;
+}
