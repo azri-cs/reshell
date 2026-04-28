@@ -57,33 +57,30 @@ impl Detector {
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
 
         // Parallel tool detection — spawn all version checks concurrently
-        let tools_to_check = ["git", "node", "docker", "cargo", "npm", "python3", "pip3", "go", "rustc"];
+        let tools_to_check = [
+            "git", "node", "docker", "cargo", "npm", "python3", "pip3", "go", "rustc",
+        ];
         let mut set = tokio::task::JoinSet::new();
         for &tool in &tools_to_check {
             set.spawn(async move {
-                let output = Command::new(tool)
-                    .arg("--version")
-                    .output()
-                    .await;
+                let output = Command::new(tool).arg("--version").output().await;
                 (tool.to_string(), output)
             });
         }
         let mut available_tools = Vec::new();
         while let Some(res) = set.join_next().await {
-            if let Ok((name, output)) = res {
-                if let Ok(output) = output {
-                    if output.status.success() {
-                        available_tools.push(ToolInfo {
-                            name,
-                            version: Some(
-                                String::from_utf8_lossy(&output.stdout)
-                                    .lines()
-                                    .next()
-                                    .unwrap_or("")
-                                    .to_string(),
-                            ),
-                        });
-                    }
+            if let Ok((name, Ok(output))) = res {
+                if output.status.success() {
+                    available_tools.push(ToolInfo {
+                        name,
+                        version: Some(
+                            String::from_utf8_lossy(&output.stdout)
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .to_string(),
+                        ),
+                    });
                 }
             }
         }

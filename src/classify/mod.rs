@@ -3,14 +3,16 @@ pub mod normalize;
 pub mod patterns;
 pub mod taxonomy;
 
-use patterns::Pattern;
-use taxonomy::RecoveryCode;
-use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
+use patterns::Pattern;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use taxonomy::RecoveryCode;
+
+type MergedPatternIndex = (Vec<Pattern>, HashMap<i32, Vec<usize>>);
 
 /// Merged patterns (user overrides + built-in) with pre-built index.
-static MERGED_PATTERNS: Lazy<(Vec<Pattern>, HashMap<i32, Vec<usize>>)> = Lazy::new(|| {
+static MERGED_PATTERNS: Lazy<MergedPatternIndex> = Lazy::new(|| {
     use patterns::PATTERNS;
     let merged = config::merged_patterns(&PATTERNS);
     let mut index: HashMap<i32, Vec<usize>> = HashMap::new();
@@ -32,7 +34,13 @@ pub struct ClassificationResult {
 ///
 /// The `stderr` passed here should already be normalized via
 /// `normalize::normalize_stderr()` for best cross-shell matching.
-pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool, detected_shell: &str) -> ClassificationResult {
+pub fn classify(
+    exit_code: i32,
+    stderr: &str,
+    stdout: &str,
+    timed_out: bool,
+    detected_shell: &str,
+) -> ClassificationResult {
     if timed_out {
         return ClassificationResult {
             code: RecoveryCode::R23,
@@ -108,6 +116,15 @@ pub fn classify(exit_code: i32, stderr: &str, _stdout: &str, timed_out: bool, de
         };
     }
 
+    // Large stdout with no clearer stderr signal: suggest scoping output (R26).
+    const LARGE_STDOUT_BYTES: usize = 512 * 1024;
+    if exit_code != 0 && stdout.len() > LARGE_STDOUT_BYTES {
+        return ClassificationResult {
+            code: RecoveryCode::R26,
+            reason: "Very large stdout on failure; try head/tail/grep to scope output".to_string(),
+        };
+    }
+
     ClassificationResult {
         code: RecoveryCode::R30,
         reason: "Non-matching failure, requires escalation".to_string(),
@@ -152,5 +169,12 @@ mod tests {
     fn test_timeout() {
         let r = classify(124, "", "", true, "");
         assert_eq!(r.code, RecoveryCode::R23);
+    }
+
+    #[test]
+    fn test_large_stdout_hints_r26() {
+        let big = "x".repeat(600 * 1024);
+        let r = classify(1, "", &big, false, "");
+        assert_eq!(r.code, RecoveryCode::R26);
     }
 }

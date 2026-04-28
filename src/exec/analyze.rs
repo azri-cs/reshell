@@ -67,7 +67,8 @@ pub fn analyze(command: &str) -> AnalysisResult {
     if var_indirect {
         warnings.push(
             "Command contains variable indirection (${...}, $x) which could mask \
-             dangerous commands.".to_string(),
+             dangerous commands."
+                .to_string(),
         );
         match origin {
             CommandOrigin::Simple => origin = CommandOrigin::WithExpansions(1),
@@ -101,7 +102,10 @@ pub fn analyze(command: &str) -> AnalysisResult {
              re-interprets strings as shell code. This can bypass static analysis."
                 .to_string(),
         );
-        if matches!(origin, CommandOrigin::WithExpansions(_) | CommandOrigin::WithEval) {
+        if matches!(
+            origin,
+            CommandOrigin::WithExpansions(_) | CommandOrigin::WithEval
+        ) {
             origin = CommandOrigin::Obfuscated;
         } else {
             origin = CommandOrigin::WithEval;
@@ -116,7 +120,10 @@ pub fn analyze(command: &str) -> AnalysisResult {
              This is a common bypass technique."
                 .to_string(),
         );
-        if matches!(origin, CommandOrigin::WithExpansions(_) | CommandOrigin::WithEval) {
+        if matches!(
+            origin,
+            CommandOrigin::WithExpansions(_) | CommandOrigin::WithEval
+        ) {
             origin = CommandOrigin::Obfuscated;
         } else {
             origin = CommandOrigin::WithEval;
@@ -187,15 +194,9 @@ fn detect_variable_indirection(command: &str) -> bool {
                     i += 2;
                     continue;
                 }
-                _ if bytes[i + 1].is_ascii_alphabetic() => {
-                    // $VAR — could be anything. Check if it's followed by
-                    // shell-operators suggesting it's being used as a command.
-                    // We need more context: look ahead for command-like usage.
-                    // For now, flag if the command starts with $ or if $var
-                    // appears at the beginning.
-                    if i == 0 {
-                        return true;
-                    }
+                _ if bytes[i + 1].is_ascii_alphabetic() && i == 0 => {
+                    // $VAR — could be anything; flag at command start.
+                    return true;
                 }
                 _ => {}
             }
@@ -233,7 +234,7 @@ fn detect_eval_exec(command: &str) -> bool {
 
     // "source file" or ". file" (note: "." alone is tricky — it's also a file path)
     // Only match "source " or ". " at command start (after pipe/semicolon)
-    let parts: Vec<&str> = command.split(|c| c == '|' || c == ';' || c == '&').collect();
+    let parts: Vec<&str> = command.split(['|', ';', '&']).collect();
     for part in parts {
         let p = part.trim();
         if p.starts_with("source ") {

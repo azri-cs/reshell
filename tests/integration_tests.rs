@@ -1,8 +1,8 @@
+use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use serde_json::{json, Value};
 
 fn rsh_bin() -> &'static str {
     env!("CARGO_BIN_EXE_rsh")
@@ -32,7 +32,10 @@ async fn test_cli_exec_echo() {
     let result: Value = serde_json::from_str(&stdout).expect("Invalid JSON");
     assert_eq!(result["status"], "success");
     assert_eq!(result["recovery_code"], "R10");
-    assert!(result["output"]["stdout"].as_str().unwrap().contains("hello"));
+    assert!(result["output"]["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("hello"));
 }
 
 #[tokio::test]
@@ -49,7 +52,10 @@ async fn test_cli_exec_command_not_found() {
     let result: Value = serde_json::from_str(&stdout).expect("Invalid JSON");
     assert_eq!(result["status"], "failed");
     assert_eq!(result["recovery_code"], "R22");
-    assert!(result["suggestion"]["action"].as_str().unwrap().contains("install"));
+    assert!(result["suggestion"]["action"]
+        .as_str()
+        .unwrap()
+        .contains("install"));
 }
 
 #[tokio::test]
@@ -66,7 +72,10 @@ async fn test_cli_exec_blocked_interactive() {
     let result: Value = serde_json::from_str(&stdout).expect("Invalid JSON");
     assert_eq!(result["status"], "failed");
     assert_eq!(result["recovery_code"], "R27");
-    assert!(result["output"]["stderr"].as_str().unwrap().contains("blocked"));
+    assert!(result["output"]["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("blocked"));
 }
 
 #[tokio::test]
@@ -110,22 +119,34 @@ async fn test_mcp_initialize() {
         "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "test", "version": "1.0" } }
     });
     let mut stdin = stdin;
-    stdin.write_all(format!("{}\n", init.to_string()).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", init).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let line = lines.next_line().await.unwrap().expect("No response");
     let resp: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(resp["id"], 1);
-    assert!(resp["result"]["serverInfo"]["name"].as_str().unwrap().contains("reshell"));
+    assert!(resp["result"]["serverInfo"]["name"]
+        .as_str()
+        .unwrap()
+        .contains("reshell"));
 
     // Send initialized notification
     let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-    stdin.write_all(format!("{}\n", note.to_string()).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", note).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     // List tools
     let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
-    stdin.write_all(format!("{}\n", list.to_string()).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", list).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let line = lines.next_line().await.unwrap().expect("No response");
@@ -148,7 +169,10 @@ async fn test_mcp_initialize() {
             "arguments": { "command": "echo mcp_test" }
         }
     });
-    stdin.write_all(format!("{}\n", call.to_string()).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", call).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let line = lines.next_line().await.unwrap().expect("No response");
@@ -157,7 +181,10 @@ async fn test_mcp_initialize() {
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let inner: Value = serde_json::from_str(text).unwrap();
     assert_eq!(inner["status"], "success");
-    assert!(inner["data"]["output"]["stdout"].as_str().unwrap().contains("mcp_test"));
+    assert!(inner["data"]["output"]["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("mcp_test"));
 
     // Cleanup
     let _ = child.kill().await;
@@ -188,12 +215,18 @@ async fn test_mcp_recover_suggestion() {
         "method": "initialize",
         "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "test", "version": "1.0" } }
     });
-    stdin.write_all(format!("{}\n", init).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", init).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
     let _ = lines.next_line().await; // init response
 
     let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-    stdin.write_all(format!("{}\n", note).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", note).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let call = json!({
@@ -205,7 +238,10 @@ async fn test_mcp_recover_suggestion() {
             "arguments": { "recovery_code": "R22", "original_command": "gh pr view", "context": "" }
         }
     });
-    stdin.write_all(format!("{}\n", call).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", call).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let line = lines.next_line().await.unwrap().expect("No response");
@@ -214,7 +250,10 @@ async fn test_mcp_recover_suggestion() {
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let inner: Value = serde_json::from_str(text).unwrap();
     assert_eq!(inner["status"], "success");
-    assert!(inner["data"]["action"].as_str().unwrap().contains("install"));
+    assert!(inner["data"]["action"]
+        .as_str()
+        .unwrap()
+        .contains("install"));
 
     let _ = child.kill().await;
 }
@@ -224,7 +263,11 @@ async fn test_cli_compact_output_id_and_view() {
     let home = unique_home_dir();
 
     let exec_output = Command::new(rsh_bin())
-        .args(["exec", "--command", "printf 'INFO start\nWARN slow\nERROR failed\n'"])
+        .args([
+            "exec",
+            "--command",
+            "printf 'INFO start\nWARN slow\nERROR failed\n'",
+        ])
         .env("HOME", &home)
         .output()
         .await
@@ -270,7 +313,8 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
             .await
             .expect("Failed second exec");
         assert!(second.status.success());
-        let second_result: Value = serde_json::from_str(&String::from_utf8_lossy(&second.stdout)).unwrap();
+        let second_result: Value =
+            serde_json::from_str(&String::from_utf8_lossy(&second.stdout)).unwrap();
         second_result["output_id"].as_str().unwrap().to_string()
     };
 
@@ -283,7 +327,13 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
     assert!(third.status.success());
 
     let diff = Command::new(rsh_bin())
-        .args(["compact", "--output-id", &second_output_id, "--view", "diff"])
+        .args([
+            "compact",
+            "--output-id",
+            &second_output_id,
+            "--view",
+            "diff",
+        ])
         .env("HOME", &home)
         .output()
         .await
@@ -318,12 +368,18 @@ async fn test_mcp_rsh_check() {
         "method": "initialize",
         "params": { "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "test", "version": "1.0" } }
     });
-    stdin.write_all(format!("{}\n", init).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", init).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
     let _ = lines.next_line().await; // init response
 
     let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-    stdin.write_all(format!("{}\n", note).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", note).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     // Call rsh_check
@@ -336,7 +392,10 @@ async fn test_mcp_rsh_check() {
             "arguments": {}
         }
     });
-    stdin.write_all(format!("{}\n", call).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", call).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let line = lines.next_line().await.unwrap().expect("No response");
@@ -348,7 +407,9 @@ async fn test_mcp_rsh_check() {
     assert_eq!(inner["data"]["status"], "healthy");
     assert!(inner["data"]["environment"]["os"].as_str().is_some());
     assert!(inner["data"]["usage"]["workflow"].as_str().is_some());
-    assert!(inner["data"]["usage"]["recovery_codes"]["R27"].as_str().is_some());
+    assert!(inner["data"]["usage"]["recovery_codes"]["R27"]
+        .as_str()
+        .is_some());
 
     let _ = child.kill().await;
 }
@@ -378,13 +439,19 @@ async fn test_mcp_jsonrpc_version_validation() {
         "method": "initialize",
         "params": {}
     });
-    stdin.write_all(format!("{}\n", bad_req).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", bad_req).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let line = lines.next_line().await.unwrap().expect("No response");
     let resp: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(resp["error"]["code"], -32600);
-    assert!(resp["error"]["message"].as_str().unwrap().contains("jsonrpc"));
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("jsonrpc"));
 
     let _ = child.kill().await;
 }

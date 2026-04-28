@@ -15,7 +15,8 @@ static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         Regex::new(r"(?i)\brm(?:\s+-\w+)*\s+-f\w*\s+(?:-\w+\s+)*-r\w*\s+/($|\s|[-])").unwrap(),
         // Write to block devices (sda, hda, nvme0n1, vda, xvd, mmcblk0p1, etc.)
         Regex::new(r">\s*/dev/(?:[sh]d[a-z]*|nvme\d+n\d+|vda|xvd[a-z]|mmcblk\d+p?\d*)").unwrap(),
-        Regex::new(r"(?i)dd\s+.*of=/dev/(?:[sh]d[a-z]*|nvme\d+n\d+|vda|xvd[a-z]|mmcblk\d+p?\d*)").unwrap(),
+        Regex::new(r"(?i)dd\s+.*of=/dev/(?:[sh]d[a-z]*|nvme\d+n\d+|vda|xvd[a-z]|mmcblk\d+p?\d*)")
+            .unwrap(),
         // Fork bomb
         Regex::new(r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;\s*:").unwrap(),
         // Format filesystem
@@ -40,7 +41,10 @@ static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         // xargs with shell execution
         Regex::new(r"(?i)\bxargs\s+.*\b(sh|bash|zsh|dash|ksh)\b").unwrap(),
         // env prefix hiding dangerous commands (env VAR=val rm -rf /)
-        Regex::new(r"(?i)\benv\s+\w+=\S+\s+(rm|dd|mkfs|shutdown|reboot|halt|poweroff|chmod|chown|kill)\b").unwrap(),
+        Regex::new(
+            r"(?i)\benv\s+\w+=\S+\s+(rm|dd|mkfs|shutdown|reboot|halt|poweroff|chmod|chown|kill)\b",
+        )
+        .unwrap(),
         // Shell -c with dangerous inner commands (bash -c 'eval ...', zsh -c 'source ...')
         Regex::new(r"(?i)\b(bash|zsh|dash|ksh|sh)\s+.*-c\s+.*\b(eval|source|\.)\b").unwrap(),
         // awk/sed with system() calls
@@ -51,9 +55,7 @@ static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 
 /// Commands that invoke interpreters often used for indirection attacks
 const INTERPRETER_COMMANDS: &[&str] = &[
-    "python", "python3", "python2",
-    "perl", "ruby", "node",
-    "lua", "php",
+    "python", "python3", "python2", "perl", "ruby", "node", "lua", "php",
 ];
 
 const INTERACTIVE_COMMANDS: &[&str] = &[
@@ -62,9 +64,7 @@ const INTERACTIVE_COMMANDS: &[&str] = &[
 
 pub fn validate(command: &str) -> Result<(), String> {
     // 0. Allowlist mode — if enabled, skip all other checks
-    if let Err(e) = allowlist::is_command_allowed(command) {
-        return Err(e);
-    }
+    allowlist::is_command_allowed(command)?;
 
     // 1. Regex-based dangerous pattern detection
     for re in DANGEROUS_PATTERNS.iter() {

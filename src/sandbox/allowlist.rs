@@ -40,16 +40,17 @@ pub struct AllowlistConfig {
     pub allow_args: bool,
 }
 
-static ALLOWLIST_CONFIG: Lazy<AllowlistConfig> = Lazy::new(|| {
-    match load_allowlist_config() {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("rsh: warning: failed to load allowlist config: {}; using blocklist mode", e);
-            AllowlistConfig {
-                mode: SandboxMode::Blocklist,
-                allowed_commands: HashSet::new(),
-                allow_args: true,
-            }
+static ALLOWLIST_CONFIG: Lazy<AllowlistConfig> = Lazy::new(|| match load_allowlist_config() {
+    Ok(config) => config,
+    Err(e) => {
+        eprintln!(
+            "rsh: warning: failed to load allowlist config: {}; using blocklist mode",
+            e
+        );
+        AllowlistConfig {
+            mode: SandboxMode::Blocklist,
+            allowed_commands: HashSet::new(),
+            allow_args: true,
         }
     }
 });
@@ -73,7 +74,9 @@ pub fn is_command_allowed(command: &str) -> Result<(), String> {
         return Err(format!(
             "Command '{}' is not in the allowlist. Allowed: {}",
             first_word,
-            ALLOWLIST_CONFIG.allowed_commands.iter()
+            ALLOWLIST_CONFIG
+                .allowed_commands
+                .iter()
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -151,9 +154,10 @@ fn load_allowlist_config() -> anyhow::Result<AllowlistConfig> {
     };
 
     let mut allowed_commands = HashSet::new();
-    let allow_args_default = config.allow.as_ref().map_or(true, |allows| {
-        allows.iter().all(|a| a.allow_args)
-    });
+    let allow_args_default = match &config.allow {
+        None => true,
+        Some(allows) => allows.iter().all(|a| a.allow_args),
+    };
 
     if let Some(allows) = config.allow {
         for section in allows {
