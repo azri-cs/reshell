@@ -29,9 +29,10 @@
 - The retry wraps the command: `<fallback_shell> -c '<original_command>'` via `posix_retry_request`.
 
 ## Trust code over docs
-- `README.md` and `RESHELL_PLAN.md` describe features not yet implemented (OverlayFS sandbox, binary output detection, jq-like extraction, SSE transport). Verify against `src/**` before claiming a feature exists.
+- `README.md` and `RESHELL_PLAN.md` can drift; verify against `src/**` before claiming a feature exists. Taxonomy codes: `src/classify/taxonomy.rs`. MCP tool names and schemas: `src/mcp/tools.rs` (`list_tools`).
+- Aspirational / not implemented: OverlayFS sandbox, binary output detection, jq-like extraction, SSE transport (see `RESHELL_PLAN.md`).
 - The MCP server is **newline-delimited JSON-RPC over stdio** (`src/mcp/server.rs` reads `stdin.lines()`), not header-framed stdio MCP. Keep tests/clients aligned unless you upgrade the transport.
-- The advertised "safety sandbox" is just pre-exec command blocking + stderr secret scrubbing (`src/sandbox/scrubber.rs`). No filesystem or network isolation exists.
+- The "safety sandbox" is pre-exec validation (patterns, interactive commands), optional `~/.reshell/allowlist.toml` command allowlist (`src/sandbox/allowlist.rs`), and stderr secret scrubbing (`src/sandbox/scrubber.rs`). No filesystem or network isolation exists.
 
 ## Pattern memory
 - State lives at `~/.reshell/patterns.db` (SQLite, created automatically via `rusqlite` with bundled feature).

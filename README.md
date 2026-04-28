@@ -6,12 +6,12 @@
 
 ## Features
 
-- **Deterministic Failure Classification** — Every non-zero exit code maps to a taxonomy (`R20`–`R30`) via regex-driven pattern matching.
+- **Deterministic Failure Classification** — Failures map to a taxonomy (`R20`–`R27`, `R30`) via regex-driven pattern matching and exit codes.
 - **Zero-LLM Recovery Engine** — Hardcoded, template-based recovery suggestions (install missing tools, fix permissions, POSIX-ify syntax, etc.).
 - **Output Compaction** — Prevents context-window pollution by truncating large outputs into head + structural skeleton + tail.
 - **Pattern Memory** — SQLite-backed learning from previous failures to provide high-confidence instant fixes on recurrence.
-- **Safety Sandbox** — Blocks dangerous commands (`rm -rf /`), interactive editors (`vim`, `nano`), and scrubs secrets from stderr.
-- **MCP Server** — Exposes `rsh_exec`, `rsh_env`, `rsh_recover`, and `rsh_compact` via Model Context Protocol (stdio transport).
+- **Safety Sandbox** — Pre-exec validation blocks dangerous and interactive commands, optional command allowlist via `~/.reshell/allowlist.toml`, and stderr secret scrubbing. There is no filesystem or network isolation.
+- **MCP Server** — Exposes `rsh_exec`, `rsh_env`, `rsh_recover`, `rsh_compact`, and `rsh_check` over **newline-delimited JSON-RPC on stdio** (one request object per line).
 
 ---
 
@@ -50,7 +50,7 @@ sudo cp target/release/rsh /usr/local/bin/
 
 ## Agent Configuration
 
-Reshell exposes an **MCP server** over stdio. Configure your agent to invoke `rsh mcp`.
+Reshell exposes an **MCP server** on stdio (newline-delimited JSON-RPC). Configure your agent to invoke `rsh mcp`.
 
 ### Claude Code
 
@@ -97,7 +97,7 @@ Add to `.cursor/mcp.json` in your project root:
 }
 ```
 
-After adding the configuration, restart your agent. The agent will automatically discover the tools `rsh_exec`, `rsh_env`, `rsh_recover`, and `rsh_compact`.
+After adding the configuration, restart your agent. The agent will discover five tools: `rsh_exec`, `rsh_env`, `rsh_recover`, `rsh_compact`, and `rsh_check`.
 
 ---
 
@@ -147,6 +147,16 @@ Execute a shell command with resilient failure handling.
 }
 ```
 
+**Additional fields (often present on failure or large output):**
+
+| Field | Meaning |
+|-------|---------|
+| `output_id` | ID of stored stdout in the pattern DB (use with `rsh_compact` when `truncated` is true). |
+| `next_action` | Suggested follow-up MCP tool name, parameters, and reason (e.g. call `rsh_recover`). |
+| `compaction_hint` | When stdout was truncated, how to call `rsh_compact` with `output_id` and a suggested view. |
+| `platform` | Host platform string for pattern matching context. |
+| `warnings` | Non-fatal notices (e.g. security-related). |
+
 ### `rsh_env`
 
 Detect and describe the current shell environment (shell type, OS, available tools, package manager).
@@ -168,9 +178,9 @@ Apply a deterministic recovery strategy for a known failure class.
 
 ### `rsh_compact`
 
-Retrieve a compacted view of a large file or previously stored output.
+Retrieve a compacted view of a large file **or** stdout previously stored from `rsh_exec` (via `output_id`).
 
-**Input Schema:**
+**Input Schema (file on disk):**
 ```json
 {
   "file": "/var/log/syslog",
@@ -178,7 +188,19 @@ Retrieve a compacted view of a large file or previously stored output.
 }
 ```
 
+**Input Schema (stored command output):**
+```json
+{
+  "output_id": "<uuid-from-rsh_exec>",
+  "view": "errors_only"
+}
+```
+
 Views: `full`, `skeleton`, `diff`, `errors_only`.
+
+### `rsh_check`
+
+Session health check and short onboarding: verifies the server is up and summarizes the `rsh_exec` → `rsh_recover` → `rsh_compact` workflow. **Input Schema:** `{}`
 
 ---
 
@@ -187,15 +209,26 @@ Views: `full`, `skeleton`, `diff`, `errors_only`.
 Reshell can also be used directly from the terminal without an agent.
 
 ```bash
-# Execute a command with structured output
+# Execute a command with structured JSON on stdout (default timeout 120s, retry on R25 enabled)
 rsh exec --command "ls -la"
+rsh exec --command "npm test" --cwd ./myapp --timeout 300
+rsh exec --command "printenv FOO" -E FOO=bar
 
 # Detect environment
 rsh env
 
-# Compact a large file
+# Compact a large file, or a stored output from a prior exec
 rsh compact --file /var/log/syslog
+rsh compact --output-id "<uuid>" --view errors_only
 ```
+
+### Execution model
+
+Commands are run as `sh -c '<command>'` by default. If `retry` is true (the default) and the first run is classified as **R25** (environment mismatch), Reshell may re-run the same command using your login shell from `$SHELL` (e.g. bash or zsh) when it differs from `sh`. See `src/env/detector.rs` and `src/exec/runner.rs` for details.
+
+### Optional command allowlist
+
+Advanced deployments can restrict which command names are permitted by creating `~/.reshell/allowlist.toml` (blocklist remains the default if the file is missing or invalid). See comments in `src/sandbox/allowlist.rs` for the TOML shape.
 
 ---
 
@@ -211,6 +244,7 @@ rsh compact --file /var/log/syslog
 | `R24` | **Subcommand Failure** | Exit 1 + pattern | `npm ERR!`, `pytest failed`, `make: ***` |
 | `R25` | **Environment Mismatch** | Shell mismatch | Bash-ism in Zsh |
 | `R26` | **Output Overflow** | stdout > threshold | Truncated output |
+| `R27` | **Blocked / Safety Violation** | Validator / allowlist | Dangerous pattern, interactive editor, or allowlist deny |
 | `R30` | **Fatal / Unknown** | Non-matching | Requires escalation |
 
 ---
@@ -228,6 +262,7 @@ AI Agent (Claude/OpenCode/Cursor)
 |  - rsh_env                |
 |  - rsh_recover            |
 |  - rsh_compact            |
+|  - rsh_check              |
 +---------------------------+
     |
     v
@@ -263,9 +298,9 @@ cargo bench
 Integration tests verify:
 - Happy path command execution via CLI and MCP.
 - Classification of `R22` (Command Not Found).
-- Blocking of dangerous and interactive commands.
+- Blocking of dangerous and interactive commands (`R27`).
 - Environment detection.
-- MCP `initialize`, `tools/list`, `tools/call` protocol compliance.
+- MCP `initialize`, `tools/list`, `tools/call` protocol compliance, including `rsh_check`.
 
 ---
 
@@ -276,8 +311,9 @@ Integration tests verify:
 - [x] Recovery Engine — Deterministic suggestions per class
 - [x] Output Compaction — Head/skeleton/tail truncation
 - [x] Pattern Memory — SQLite-backed persistence
-- [x] MCP Server — stdio transport for Claude Code / OpenCode / Cursor
-- [ ] Safety Hardening — OverlayFS sandbox, allowlist
+- [x] MCP Server — newline-delimited JSON-RPC stdio for Claude Code / OpenCode / Cursor
+- [x] Optional command allowlist — `~/.reshell/allowlist.toml` (see `src/sandbox/allowlist.rs`)
+- [ ] Safety Hardening — OverlayFS or equivalent filesystem isolation; Linux seccomp syscall filtering (stub in `src/sandbox/seccomp.rs`)
 - [ ] Distribution — `cargo install`, Homebrew formula
 
 ---

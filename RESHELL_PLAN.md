@@ -85,6 +85,7 @@ A deterministic, regex and exit-code-driven taxonomy:
 | `R24` | **Subcommand Failure** | Exit 1 with known patterns | `npm ERR!`, `pytest failed`, `make: ***` |
 | `R25` | **Environment Mismatch** | Exit 1 + shell mismatch | Bash-ism in Zsh, missing env var |
 | `R26` | **Output Overflow** | stdout > threshold | Truncated due to size limits |
+| `R27` | **Blocked / Safety Violation** | Pre-exec validator or allowlist | Dangerous pattern, interactive editor, allowlist deny |
 | `R30` | **Fatal / Unknown** | Non-matching failure | Requires human/agent escalation |
 
 ### 4.4 Recovery Strategy Engine (`recover`)
@@ -99,6 +100,7 @@ A deterministic, regex and exit-code-driven taxonomy:
 | `R24` Subcommand | Parse tool-specific error logs | Suggest next diagnostic command (e.g., `npm ls`) |
 | `R25` Env Mismatch | Detect bashism, suggest portable form | Suggest POSIX-compliant alternative |
 | `R26` Overflow | Truncate, return structural skeleton | Suggest scoped command (`grep`, `head`) |
+| `R27` Blocked | No execution | Explain block reason; adjust command or allowlist config |
 
 The engine returns a structured JSON response to the agent:
 ```json
