@@ -16,11 +16,6 @@ pub fn normalize_command(command: &str) -> String {
     command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub fn normalize_stderr(stderr: &str) -> String {
-    // Delegates to the cross-platform normalizer for consistent behavior.
-    crate::classify::normalize::normalize_stderr(stderr)
-}
-
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }

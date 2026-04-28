@@ -4,16 +4,9 @@ pub mod view;
 
 use serde::{Deserialize, Serialize};
 use crate::utils::is_binary;
-use once_cell::sync::Lazy;
-use regex::Regex;
 
 const MAX_OUTPUT_LINES: usize = 100;
 const TAIL_LINES: usize = 20;
-
-/// Regex for extracting structural "skeleton" lines (function defs, classes, log levels, etc.)
-static SKELETON_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(\s*)(fn |function |class |struct |mod |pub fn |impl |ERROR|WARN|INFO|DEBUG|TRACE)").unwrap()
-});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactResult {
@@ -64,7 +57,7 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
             tail_ring.pop_front();
         }
         tail_ring.push_back(line);
-        if SKELETON_RE.is_match(line) {
+        if skeleton::SKELETON_RE.is_match(line) {
             skeleton_lines.push(line.to_string());
         }
     }

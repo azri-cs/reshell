@@ -1,7 +1,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-static SKELETON_RE: Lazy<Regex> = Lazy::new(|| {
+/// Regex for extracting structural "skeleton" lines (function defs, classes, log levels, etc.)
+pub static SKELETON_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^(\s*)(fn |function |class |struct |mod |pub fn |impl |ERROR|WARN|INFO|DEBUG|TRACE)").unwrap()
 });
 

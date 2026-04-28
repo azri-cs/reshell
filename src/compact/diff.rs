@@ -1,6 +1,6 @@
+/// Compute a hash of text content for change detection.
 pub fn compute_hash(text: &str) -> String {
-    let hash = xxhash_rust::xxh3::xxh3_64(text.as_bytes());
-    format!("{:016x}", hash)
+    crate::utils::hash_command(text)
 }
 
 /// Simple line diff: returns lines present in new but not in old
