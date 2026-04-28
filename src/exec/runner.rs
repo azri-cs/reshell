@@ -21,21 +21,53 @@ const MAX_TIMEOUT_SECS: u64 = 600;
 /// Environment variables that must not be injected via the env parameter.
 static BLOCKED_ENV_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     HashSet::from([
+        // Dynamic linker injection
         "LD_PRELOAD",
         "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "LD_ORIGIN_PATH",
         "DYLD_INSERT_LIBRARIES",
         "DYLD_LIBRARY_PATH",
+        // Core environment
         "PATH",
         "SHELL",
         "HOME",
         "USER",
         "LOGNAME",
+        // Shell auto-execute on startup
+        "BASH_ENV",
+        "ENV",
+        "PROMPT_COMMAND",
+        // Language runtime injection
         "NODE_OPTIONS",
+        "NODE_PATH",
         "PYTHONPATH",
         "PYTHONSTARTUP",
+        "RUBYOPT",
+        "PERL5OPT",
+        "PERL5LIB",
+        "JAVA_TOOL_OPTIONS",
+        // Rust debugging
         "RUST_LOG",
         "RUST_BACKTRACE",
+        // Shell field separator
         "IFS",
+        // Temp directory redirection
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        // SSH/Docker agent hijacking
+        "SSH_AUTH_SOCK",
+        "DOCKER_HOST",
+        // Git operation hijacking
+        "GIT_EXEC_PATH",
+        "GIT_TEMPLATE_DIR",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        // Editor/visual could execute arbitrary programs
+        "EDITOR",
+        "VISUAL",
+        "FCEDIT",
     ])
 });
 
@@ -111,19 +143,22 @@ impl Runner {
                 retry_request.as_ref().unwrap_or(req)
             };
             let attempt = self.execute_once(current_req, current_shell).await?;
-            let norm_stderr = normalize_stderr(&attempt.stderr);
-            let classification = classify(attempt.exit_code, &norm_stderr, &attempt.stdout, attempt.timed_out, &detector.shell);
+            // Quick check: only classify enough to decide if retry is needed.
+            // Full classification happens once after the loop on scrubbed output.
             let should_retry = req.retry
                 && attempt_idx == 0
-                && classification.code == RecoveryCode::R25
-                && retry_shell.is_some();
-            last_attempt = Some((attempt, classification));
+                && retry_shell.is_some()
+                && {
+                    let norm = normalize_stderr(&attempt.stderr);
+                    classify(attempt.exit_code, &norm, &attempt.stdout, attempt.timed_out, &detector.shell).code == RecoveryCode::R25
+                };
+            last_attempt = Some(attempt);
             if !should_retry {
                 break;
             }
         }
 
-        let (attempt, _initial_classification) = last_attempt.expect("execution attempt should exist");
+        let attempt = last_attempt.expect("execution attempt should exist");
         let stdout = attempt.stdout;
         let stderr = attempt.stderr;
         let exit_code = attempt.exit_code;
@@ -136,18 +171,20 @@ impl Runner {
         // 3b. Normalize stderr for cross-shell classification
         let normalized_stderr = normalize_stderr(&scrubbed_stderr);
 
-        // 4. Classify (on normalized stderr for cross-shell compatibility)
+        // 4. Classify once on scrubbed+normalized stderr
         let classification = classify(exit_code, &normalized_stderr, &scrubbed_stdout, timed_out, &detector.shell);
 
         // 4b. Audit log
-        let _ = self.store.log_audit_entry(
+        if let Err(e) = self.store.log_audit_entry(
             &hash_command(&normalize_command(&req.command)),
             &normalize_command(&req.command),
             req.cwd.as_deref(),
             exit_code,
             &classification.code.to_string(),
             true, // validation passed
-        ).await;
+        ).await {
+            eprintln!("rsh: warning: failed to write audit log: {}", e);
+        }
 
         // 5. Compact output
         let compacted = compact::compact(&scrubbed_stdout, None);
@@ -179,13 +216,15 @@ impl Runner {
 
         // 7. Persist output
         let output_id = self.store.next_output_id();
-        let _ = self.store.save_output(
+        if let Err(e) = self.store.save_output(
             &output_id,
             &req.command,
             &final_stdout,
             &scrubbed_stderr,
             exit_code,
-        ).await;
+        ).await {
+            eprintln!("rsh: warning: failed to persist output (output_id={}): {}", output_id, e);
+        }
 
         if classification.code != RecoveryCode::R10 && memory_pattern.is_none() {
             let learned_pattern = Pattern {
@@ -200,7 +239,9 @@ impl Runner {
                 usage_count: 1,
                 platform_tag: Some(crate::memory::pattern::current_platform_tag().to_string()),
             };
-            let _ = self.store.save_pattern(&learned_pattern).await;
+            if let Err(e) = self.store.save_pattern(&learned_pattern).await {
+                eprintln!("rsh: warning: failed to save learned pattern: {}", e);
+            }
         }
 
         let status = if classification.code == RecoveryCode::R10 {

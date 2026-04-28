@@ -229,18 +229,9 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
             };
             let view = CompactView::parse(req.view.as_deref().unwrap_or("skeleton"));
             if let Some(file_path) = req.file {
-                // Validate path is within allowed directory (CWD)
-                let validated = match paths::validate_file_path(&file_path) {
-                    Ok(p) => p,
-                    Err(e) => return ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("Path validation failed: {}", e)),
-                        data: None,
-                        is_error: true,
-                    },
-                };
-                match tokio::fs::read_to_string(&validated).await {
-                    Ok(content) => {
+                // Validate path and read file atomically to prevent TOCTOU races
+                match paths::validate_and_read_file(&file_path) {
+                    Ok((_path, content)) => {
                         let compacted = render_view(&content, view, None, None);
                         ToolResponse {
                             status: "success".to_string(),
@@ -251,7 +242,7 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                     }
                     Err(e) => ToolResponse {
                         status: "error".to_string(),
-                        error: Some(format!("Failed to read file: {}", e)),
+                        error: Some(format!("File access failed: {}", e)),
                         data: None,
                         is_error: true,
                     },

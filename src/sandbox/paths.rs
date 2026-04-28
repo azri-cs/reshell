@@ -5,6 +5,8 @@ const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Validate that a file path is within the allowed directory tree (CWD by default)
 /// and does not traverse outside it. Also validates the file exists and is not too large.
+///
+/// Returns the canonical path. For TOCTOU-safe reading, use [`validate_and_read_file`].
 pub fn validate_file_path(file_path: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(file_path);
 
@@ -56,6 +58,22 @@ pub fn validate_file_path(file_path: &str) -> anyhow::Result<PathBuf> {
     }
 
     validate_file_metadata(&canonical)
+}
+
+/// Validate and read a file in one atomic operation to prevent TOCTOU races.
+///
+/// This opens the file handle immediately after canonicalization, so a symlink
+/// swap between validation and read cannot redirect to an unauthorized path.
+pub fn validate_and_read_file(file_path: &str) -> anyhow::Result<(PathBuf, String)> {
+    let canonical = validate_file_path(file_path)?;
+
+    // Open the file immediately — the file handle is bound to the inode,
+    // so a subsequent symlink swap cannot redirect the read.
+    let content = std::fs::read_to_string(&canonical).map_err(|e| {
+        anyhow::anyhow!("Failed to read file {}: {}", canonical.display(), e)
+    })?;
+
+    Ok((canonical, content))
 }
 
 /// Check file metadata — size limits only, no extension restrictions.

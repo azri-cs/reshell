@@ -22,8 +22,10 @@ static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         Regex::new(r"(?i)mkfs\b").unwrap(),
         // Shutdown / reboot / halt / poweroff
         Regex::new(r"(?i)\b(shutdown|reboot|halt|poweroff|init\s+[06])\b").unwrap(),
-        // Pipe to shell (curl/wget piped to bash/sh/zsh)
+        // Pipe to shell (curl/wget/printf/echo/awk/sed/tee piped to bash/sh/zsh)
         Regex::new(r"(?i)(curl|wget|fetch)\b.*\|\s*(bash|sh|zsh|dash|ksh|fish)\b").unwrap(),
+        Regex::new(r"(?i)(printf|echo)\b.*\|\s*(bash|sh|zsh|dash|ksh|fish)\b").unwrap(),
+        Regex::new(r"(?i)(awk|sed|tee)\b.*\|\s*(bash|sh|zsh|dash|ksh|fish)\b").unwrap(),
         // Redirect to shell from curl/wget (process substitution: bash <(curl ...))
         Regex::new(r"(?i)(bash|sh|zsh|dash|ksh)\s+<\(?(curl|wget|fetch)\b").unwrap(),
         // chmod/chown recursive on root or home
@@ -35,6 +37,15 @@ static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         // Overwrite critical system files
         Regex::new(r"(?i)cat\s+/dev/null\s+>\s*/etc/(passwd|shadow|sudoers|ssh)").unwrap(),
         Regex::new(r"(?i)echo\s+.*>\s*/etc/(passwd|shadow|sudoers|ssh)").unwrap(),
+        // xargs with shell execution
+        Regex::new(r"(?i)\bxargs\s+.*\b(sh|bash|zsh|dash|ksh)\b").unwrap(),
+        // env prefix hiding dangerous commands (env VAR=val rm -rf /)
+        Regex::new(r"(?i)\benv\s+\w+=\S+\s+(rm|dd|mkfs|shutdown|reboot|halt|poweroff|chmod|chown|kill)\b").unwrap(),
+        // Shell -c with dangerous inner commands (bash -c 'eval ...', zsh -c 'source ...')
+        Regex::new(r"(?i)\b(bash|zsh|dash|ksh|sh)\s+.*-c\s+.*\b(eval|source|\.)\b").unwrap(),
+        // awk/sed with system() calls
+        Regex::new(r"(?i)\bawk\b.*\bsystem\s*\(").unwrap(),
+        Regex::new(r"(?i)\bsed\b.*-e\s.*\|\s*(bash|sh|zsh)").unwrap(),
     ]
 });
 

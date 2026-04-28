@@ -1,6 +1,5 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
 use super::taxonomy::RecoveryCode;
 
 pub struct Pattern {
@@ -104,40 +103,6 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
                 Regex::new(r"Unknown command").unwrap(),
             ],
         },
-        // ── R24: Subcommand Failure ───────────────────────────────────────
-        Pattern {
-            code: RecoveryCode::R24,
-            exit_codes: vec![1],
-            stderr_regexes: vec![
-                // Node.js / npm
-                Regex::new(r"npm ERR!").unwrap(),
-                Regex::new(r"node:.*error").unwrap(),
-                // Rust / Cargo
-                Regex::new(r"error\[.*\]").unwrap(),
-                Regex::new(r"error:.*compilation").unwrap(),
-                Regex::new(r"could not compile").unwrap(),
-                // Make
-                Regex::new(r"make: \*\*\*").unwrap(),
-                // Python
-                Regex::new(r"pytest failed").unwrap(),
-                Regex::new(r"TypeError:").unwrap(),
-                Regex::new(r"ImportError:").unwrap(),
-                Regex::new(r"ModuleNotFoundError:").unwrap(),
-                Regex::new(r"SyntaxError:").unwrap(),
-                Regex::new(r"pip failed with error").unwrap(),
-                // Docker
-                Regex::new(r"docker: Error response from daemon").unwrap(),
-                // K8s
-                Regex::new(r"kubectl: error:").unwrap(),
-                // Go
-                Regex::new(r"go: .*: .*: .*:").unwrap(), // go build multi-path errors
-                Regex::new(r"panic:").unwrap(),
-                // Generic
-                Regex::new(r"FAILED").unwrap(),
-                Regex::new(r"FAIL").unwrap(),
-                Regex::new(r"ERROR").unwrap(),
-            ],
-        },
         // ── R25: Environment Mismatch ──────────────────────────────────────
         // These use EXIT_CODE_ANY because they are specific enough to
         // only match genuine shell/environment issues.
@@ -160,17 +125,4 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
             ],
         },
     ]
-});
-
-/// Pre-built index: maps exit codes to pattern indices for O(1) lookup.
-/// Exit code `-1` (EXIT_CODE_ANY) is indexed separately for shell-agnostic
-/// matching that runs after exit-code-specific patterns.
-pub static PATTERN_INDEX: Lazy<HashMap<i32, Vec<usize>>> = Lazy::new(|| {
-    let mut index: HashMap<i32, Vec<usize>> = HashMap::new();
-    for (i, pattern) in PATTERNS.iter().enumerate() {
-        for &code in &pattern.exit_codes {
-            index.entry(code).or_default().push(i);
-        }
-    }
-    index
 });

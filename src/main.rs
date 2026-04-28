@@ -34,8 +34,7 @@ async fn main() -> Result<()> {
             let view = CompactView::parse(&view);
 
             let result = if let Some(path) = file {
-                let validated = paths::validate_file_path(&path)?;
-                let content = tokio::fs::read_to_string(&validated).await?;
+                let (_validated, content) = paths::validate_and_read_file(&path)?;
                 render_view(&content, view, None, None)
             } else if let Some(output_id) = output_id {
                 if let Some(output) = store.get_output(&output_id).await? {
