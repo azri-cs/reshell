@@ -1,7 +1,7 @@
-use reshell::cli::{Cli, Commands};
-use clap::Parser;
 use anyhow::Result;
-use reshell::compact::view::{CompactView, render_view};
+use clap::Parser;
+use reshell::cli::{Cli, Commands};
+use reshell::compact::view::{render_view, CompactView};
 use reshell::memory::Store;
 use reshell::sandbox::paths;
 
@@ -11,25 +11,37 @@ async fn main() -> Result<()> {
 
     match args.command {
         Commands::Mcp => {
-            let server = reshell::mcp::McpServer::new();
+            let server = reshell::mcp::McpServer::new()?;
             server.run().await?;
         }
-        Commands::Exec { command, cwd, timeout, retry, env } => {
+        Commands::Exec {
+            command,
+            cwd,
+            timeout,
+            retry,
+            env,
+        } => {
             let runner = reshell::exec::runner::Runner::new()?;
-            let result = runner.run(&reshell::exec::ExecRequest {
-                command,
-                cwd,
-                timeout,
-                env: env.into_iter().collect(),
-                retry,
-            }).await?;
+            let result = runner
+                .run(&reshell::exec::ExecRequest {
+                    command,
+                    cwd,
+                    timeout,
+                    env: env.into_iter().collect(),
+                    retry,
+                })
+                .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Env => {
             let detector = reshell::env::Detector::cached().await;
             println!("{}", serde_json::to_string_pretty(&detector)?);
         }
-        Commands::Compact { file, output_id, view } => {
+        Commands::Compact {
+            file,
+            output_id,
+            view,
+        } => {
             let store = Store::new()?;
             let view = CompactView::parse(&view);
 
@@ -39,12 +51,19 @@ async fn main() -> Result<()> {
             } else if let Some(output_id) = output_id {
                 if let Some(output) = store.get_output(&output_id).await? {
                     let previous = if matches!(view, CompactView::Diff) {
-                        store.previous_output(&output.output_id).await?
+                        store
+                            .previous_output(&output.output_id)
+                            .await?
                             .map(|previous| previous.stdout)
                     } else {
                         None
                     };
-                    render_view(&output.stdout, view, previous.as_deref(), Some(output.output_id))
+                    render_view(
+                        &output.stdout,
+                        view,
+                        previous.as_deref(),
+                        Some(output.output_id),
+                    )
                 } else {
                     anyhow::bail!("Unknown output_id: {}", output_id);
                 }

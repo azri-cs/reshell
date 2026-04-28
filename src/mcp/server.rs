@@ -1,9 +1,9 @@
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-use super::tools::{list_tools, handle_tool_call};
+use super::tools::{handle_tool_call, list_tools};
 use crate::memory::Store;
 
 /// Maximum allowed size for a single incoming JSON-RPC line (1 MB).
@@ -19,11 +19,12 @@ pub(crate) struct ServerState {
 }
 
 impl McpServer {
-    pub fn new() -> Self {
-        let store = Store::new().expect("Failed to open pattern DB");
-        Self {
+    /// Open the pattern store and start server state. Fails if `~/.reshell` or the DB cannot be opened.
+    pub fn new() -> anyhow::Result<Self> {
+        let store = Store::new()?;
+        Ok(Self {
             state: Arc::new(Mutex::new(ServerState { store })),
-        }
+        })
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -48,12 +49,17 @@ impl McpServer {
             let req: JsonRpcRequest = match serde_json::from_str(&line) {
                 Ok(r) => r,
                 Err(e) => {
+                    let detail = e.to_string();
+                    let detail = if detail.len() > 240 {
+                        format!("{}…", &detail[..240])
+                    } else {
+                        detail
+                    };
                     let resp = json!({
                         "jsonrpc": "2.0",
                         "id": null,
-                        "error": { "code": -32700, "message": "Parse error: invalid JSON-RPC request" }
+                        "error": { "code": -32700, "message": format!("Parse error: invalid JSON-RPC request ({})", detail) }
                     });
-                    let _ = e; // avoid unused variable warning
                     Self::write_line(&mut stdout, &resp).await?;
                     continue;
                 }
@@ -99,7 +105,7 @@ impl McpServer {
                     },
                     "serverInfo": {
                         "name": "reshell",
-                        "version": "0.1.0"
+                        "version": env!("CARGO_PKG_VERSION")
                     },
                     "instructions": "Reshell provides resilient shell execution with automatic failure classification and recovery. Always use rsh_exec instead of raw bash for any command that might fail. When rsh_exec returns status='failed', call rsh_recover with the returned recovery_code and original_command to get a deterministic fix suggestion (or use the next_action field for ready-to-use parameters). When output is truncated (truncated=true), use rsh_compact with the returned output_id and view='skeleton' for a structural summary. Start a session with rsh_check to verify the pipeline and get usage guidance."
                 }
@@ -119,7 +125,11 @@ impl McpServer {
         }
 
         if req.method == "tools/call" {
-            let name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = req
+                .params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let arguments = req.params.get("arguments").cloned().unwrap_or(json!({}));
             let result = handle_tool_call(name, arguments, &self.state).await;
             let is_error = result.is_error;
