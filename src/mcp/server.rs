@@ -59,6 +59,17 @@ impl McpServer {
                 }
             };
 
+            // Validate JSON-RPC version
+            if req._jsonrpc != "2.0" {
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": { "code": -32600, "message": "Invalid Request: jsonrpc must be \"2.0\"" }
+                });
+                Self::write_line(&mut stdout, &resp).await?;
+                continue;
+            }
+
             if let Some(resp) = self.handle_request(req).await {
                 Self::write_line(&mut stdout, &resp).await?;
             }

@@ -90,12 +90,12 @@ impl Runner {
         if let Err(e) = validator::validate(&req.command) {
             return Ok(ExecResult {
                 status: "failed".to_string(),
-                recovery_code: RecoveryCode::R30.to_string(),
-                recovery_class: RecoveryCode::R30.class_name().to_string(),
+                recovery_code: RecoveryCode::R27.to_string(),
+                recovery_class: RecoveryCode::R27.class_name().to_string(),
                 original_command: req.command.clone(),
                 output_id: None,
                 suggestion: serde_json::to_value(suggest::suggest(
-                    RecoveryCode::R30,
+                    RecoveryCode::R27,
                     &req.command,
                     &e,
                     &Detector::default(),
@@ -109,7 +109,7 @@ impl Runner {
                 next_action: Some(NextAction {
                     tool: "rsh_recover".to_string(),
                     params: serde_json::json!({
-                        "recovery_code": "R30",
+                        "recovery_code": "R27",
                         "original_command": req.command,
                         "context": e,
                     }),
@@ -117,6 +117,7 @@ impl Runner {
                 }),
                 compaction_hint: None,
                 platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
+                warnings: vec![],
             });
         }
 
@@ -163,6 +164,7 @@ impl Runner {
         let stderr = attempt.stderr;
         let exit_code = attempt.exit_code;
         let timed_out = attempt.timed_out;
+        let warnings = attempt.warnings;
 
         // 3. Scrub secrets from both stderr and stdout
         let scrubbed_stderr = scrubber::scrub_secrets(&stderr);
@@ -301,6 +303,7 @@ impl Runner {
             next_action,
             compaction_hint,
             platform: Some(platform_tag),
+            warnings,
         })
     }
 
@@ -313,9 +316,11 @@ impl Runner {
             })?;
             cmd.current_dir(validated);
         }
+        let mut warnings = Vec::new();
         for (k, v) in &req.env {
             if BLOCKED_ENV_KEYS.contains(&k.as_str()) {
-                continue; // Silently skip security-sensitive env vars
+                warnings.push(format!("Blocked security-sensitive env var: {}", k));
+                continue;
             }
             cmd.env(k, v);
         }
@@ -329,6 +334,7 @@ impl Runner {
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                 exit_code: output.status.code().unwrap_or(-1),
                 timed_out: false,
+                warnings,
             }),
             Ok(Err(e)) => Err(anyhow::anyhow!("Failed to spawn process: {}", e)),
             Err(_) => Ok(ExecutionAttempt {
@@ -336,6 +342,7 @@ impl Runner {
                 stderr: "Process timed out".to_string(),
                 exit_code: 124,
                 timed_out: true,
+                warnings,
             }),
         }
     }
@@ -352,6 +359,7 @@ struct ExecutionAttempt {
     stderr: String,
     exit_code: i32,
     timed_out: bool,
+    warnings: Vec<String>,
 }
 
 #[cfg(test)]

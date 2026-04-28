@@ -21,12 +21,21 @@ pub fn suggest(
             confidence: "high".to_string(),
             reason: "Syntax error detected. Review flags and usage.".to_string(),
         },
-        RecoveryCode::R21 => Suggestion {
-            action: "fix_permissions".to_string(),
-            command: Some(format!("sudo {}", original_command)),
-            confidence: "medium".to_string(),
-            reason: "Permission denied. Try with sudo or fix file permissions.".to_string(),
-        },
+        RecoveryCode::R21 => {
+            // Only suggest sudo for the command itself, not the full command string,
+            // to avoid injecting shell metacharacters into a privileged context.
+            let safe_cmd = if contains_shell_operators(original_command) {
+                first_word(original_command).to_string()
+            } else {
+                original_command.to_string()
+            };
+            Suggestion {
+                action: "fix_permissions".to_string(),
+                command: Some(format!("sudo {}", safe_cmd)),
+                confidence: "medium".to_string(),
+                reason: "Permission denied. Try with sudo or fix file permissions.".to_string(),
+            }
+        }
         RecoveryCode::R22 => {
             let cmd = first_word(original_command);
             let install_cmd = detector.suggest_install_command(cmd);
@@ -61,6 +70,12 @@ pub fn suggest(
             confidence: "high".to_string(),
             reason: "Output overflow. Use grep/head/tail to scope results.".to_string(),
         },
+        RecoveryCode::R27 => Suggestion {
+            action: "rewrite_command".to_string(),
+            command: None,
+            confidence: "high".to_string(),
+            reason: "Command blocked by safety validator. Use a safer alternative.".to_string(),
+        },
         RecoveryCode::R30 => Suggestion {
             action: "escalate".to_string(),
             command: None,
@@ -72,6 +87,17 @@ pub fn suggest(
 
 fn first_word(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or(command)
+}
+
+/// Check if a command contains shell operators that could chain dangerous commands.
+fn contains_shell_operators(command: &str) -> bool {
+    const OPERATORS: &[&str] = &["|", ";", "&&", "||", ">", ">>", "<", "<<<", "<<", "&"];
+    for op in OPERATORS {
+        if command.contains(op) {
+            return true;
+        }
+    }
+    false
 }
 
 fn diagnostic_for_tool(command: &str) -> Option<String> {

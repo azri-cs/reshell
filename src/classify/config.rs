@@ -126,9 +126,10 @@ fn parse_recovery_code(s: &str) -> anyhow::Result<RecoveryCode> {
         "R24" => Ok(RecoveryCode::R24),
         "R25" => Ok(RecoveryCode::R25),
         "R26" => Ok(RecoveryCode::R26),
+        "R27" => Ok(RecoveryCode::R27),
         "R30" => Ok(RecoveryCode::R30),
         _ => anyhow::bail!(
-            "unknown recovery code '{}'; valid: R10, R20-R26, R30",
+            "unknown recovery code '{}'; valid: R10, R20-R27, R30",
             s
         ),
     }

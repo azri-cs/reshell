@@ -65,7 +65,7 @@ async fn test_cli_exec_blocked_interactive() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let result: Value = serde_json::from_str(&stdout).expect("Invalid JSON");
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["recovery_code"], "R30");
+    assert_eq!(result["recovery_code"], "R27");
     assert!(result["output"]["stderr"].as_str().unwrap().contains("blocked"));
 }
 

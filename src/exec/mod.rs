@@ -34,6 +34,9 @@ pub struct ExecResult {
     /// Platform where this execution ran (for pattern matching context).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Non-fatal warnings (e.g., blocked env vars, security notices).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

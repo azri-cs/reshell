@@ -165,6 +165,7 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                         "R24": "Subcommand Failure — run diagnostic command to investigate.",
                         "R25": "Environment Mismatch — use POSIX-compatible syntax. rsh will auto-retry with fallback shell.",
                         "R26": "Output Overflow — use rsh_compact to get a compacted view.",
+                        "R27": "Blocked / Safety Violation — command was blocked by the safety validator.",
                         "R30": "Fatal/Unknown — requires human escalation."
                     }
                 },
@@ -304,6 +305,7 @@ fn parse_recovery_code(code: &str) -> RecoveryCode {
         "R24" => RecoveryCode::R24,
         "R25" => RecoveryCode::R25,
         "R26" => RecoveryCode::R26,
+        "R27" => RecoveryCode::R27,
         _ => RecoveryCode::R30,
     }
 }

@@ -11,6 +11,7 @@ pub enum RecoveryCode {
     R24,
     R25,
     R26,
+    R27,
     R30,
 }
 
@@ -25,6 +26,7 @@ impl RecoveryCode {
             RecoveryCode::R24 => "Subcommand Failure",
             RecoveryCode::R25 => "Environment Mismatch",
             RecoveryCode::R26 => "Output Overflow",
+            RecoveryCode::R27 => "Blocked / Safety Violation",
             RecoveryCode::R30 => "Fatal / Unknown",
         }
     }
