@@ -20,13 +20,11 @@ use super::patterns::Pattern;
 use super::taxonomy::RecoveryCode;
 
 /// Loaded user patterns (empty if config file doesn't exist or has errors).
-static USER_PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
-    match load_user_patterns() {
-        Ok(patterns) => patterns,
-        Err(e) => {
-            eprintln!("rsh: warning: failed to load user patterns: {}", e);
-            Vec::new()
-        }
+static USER_PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| match load_user_patterns() {
+    Ok(patterns) => patterns,
+    Err(e) => {
+        eprintln!("rsh: warning: failed to load user patterns: {}", e);
+        Vec::new()
     }
 });
 
@@ -103,9 +101,8 @@ fn parse_user_pattern(def: &UserPatternDef) -> anyhow::Result<Pattern> {
 
     let mut stderr_regexes = Vec::with_capacity(def.stderr_regexes.len());
     for (i, re_str) in def.stderr_regexes.iter().enumerate() {
-        let re = Regex::new(re_str).map_err(|e| {
-            anyhow::anyhow!("invalid regex #{} `{}`: {}", i + 1, re_str, e)
-        })?;
+        let re = Regex::new(re_str)
+            .map_err(|e| anyhow::anyhow!("invalid regex #{} `{}`: {}", i + 1, re_str, e))?;
         stderr_regexes.push(re);
     }
 
@@ -128,10 +125,7 @@ fn parse_recovery_code(s: &str) -> anyhow::Result<RecoveryCode> {
         "R26" => Ok(RecoveryCode::R26),
         "R27" => Ok(RecoveryCode::R27),
         "R30" => Ok(RecoveryCode::R30),
-        _ => anyhow::bail!(
-            "unknown recovery code '{}'; valid: R10, R20-R27, R30",
-            s
-        ),
+        _ => anyhow::bail!("unknown recovery code '{}'; valid: R10, R20-R27, R30", s),
     }
 }
 

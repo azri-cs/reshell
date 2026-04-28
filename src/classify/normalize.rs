@@ -17,9 +17,8 @@ use regex::Regex;
 /// Strips ANSI CSI (Control Sequence Introducer) and OSC sequences.
 /// CSI: `\x1b[` + params + letter  (colors, cursor movements)
 /// OSC: `\x1b]` + content + `\x07`  (terminal title, etc.)
-static ANSI_ESCAPE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)").unwrap()
-});
+static ANSI_ESCAPE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)").unwrap());
 
 fn strip_ansi_escapes(text: &str) -> String {
     ANSI_ESCAPE_RE.replace_all(text, "").to_string()

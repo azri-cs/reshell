@@ -1,5 +1,5 @@
-use regex::Regex;
 use once_cell::sync::Lazy;
+use regex::Regex;
 
 static SECRET_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
@@ -77,7 +77,9 @@ pub fn scrub_secrets(text: &str) -> String {
     static PEM_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)").unwrap()
     });
-    result = PEM_RE.replace_all(&result, "[REDACTED PEM KEY]").to_string();
+    result = PEM_RE
+        .replace_all(&result, "[REDACTED PEM KEY]")
+        .to_string();
 
     // Third pass: entropy-based detection for unknown credential formats
     result = scrub_high_entropy_strings(&result);
@@ -199,7 +201,8 @@ mod tests {
 
     #[test]
     fn test_scrub_pem_key() {
-        let text = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
+        let text =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
         let scrubbed = scrub_secrets(text);
         assert!(scrubbed.contains("[REDACTED PEM KEY]"));
         assert!(!scrubbed.contains("MIIEpAIBAAKCAQEA"));
@@ -227,8 +230,10 @@ mod tests {
         let text = "key=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
         let scrubbed = scrub_secrets(text);
         // Either regex-based hex pattern or entropy-based should catch this
-        assert!(scrubbed.contains("[REDACTED]") || !scrubbed.contains("a1b2c3"),
-            "high-entropy hex string should be redacted");
+        assert!(
+            scrubbed.contains("[REDACTED]") || !scrubbed.contains("a1b2c3"),
+            "high-entropy hex string should be redacted"
+        );
     }
 
     #[test]

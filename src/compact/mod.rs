@@ -2,8 +2,8 @@ pub mod diff;
 pub mod skeleton;
 pub mod view;
 
-use serde::{Deserialize, Serialize};
 use crate::utils::is_binary;
+use serde::{Deserialize, Serialize};
 
 const MAX_OUTPUT_LINES: usize = 100;
 const TAIL_LINES: usize = 20;

@@ -1,6 +1,6 @@
+use super::taxonomy::RecoveryCode;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use super::taxonomy::RecoveryCode;
 
 pub struct Pattern {
     pub code: RecoveryCode,
@@ -97,7 +97,8 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
                 Regex::new(r": not found$").unwrap(),
                 Regex::new(r"No such file or directory").unwrap(),
                 // PowerShell (after normalization becomes "command not found: X")
-                Regex::new(r"is not recognized as (?:the name of )?a(?:n?)\s*(?:cmdlet|command)").unwrap(),
+                Regex::new(r"is not recognized as (?:the name of )?a(?:n?)\s*(?:cmdlet|command)")
+                    .unwrap(),
                 Regex::new(r"is not recognized as an internal or external command").unwrap(),
                 // fish (after normalization)
                 Regex::new(r"Unknown command").unwrap(),

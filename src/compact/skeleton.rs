@@ -3,7 +3,10 @@ use regex::Regex;
 
 /// Regex for extracting structural "skeleton" lines (function defs, classes, log levels, etc.)
 pub static SKELETON_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(\s*)(fn |function |class |struct |mod |pub fn |impl |ERROR|WARN|INFO|DEBUG|TRACE)").unwrap()
+    Regex::new(
+        r"^(\s*)(fn |function |class |struct |mod |pub fn |impl |ERROR|WARN|INFO|DEBUG|TRACE)",
+    )
+    .unwrap()
 });
 
 pub fn extract_skeleton(text: &str) -> String {

@@ -36,12 +36,10 @@ pub struct sock_filter {
 /// (`cargo add libseccomp`) for production use.
 #[cfg(target_os = "linux")]
 pub fn build_seccomp_filter_blocklist() -> Result<Vec<sock_filter>, String> {
-    Err(
-        "seccomp BPF filter requires libseccomp crate. \
+    Err("seccomp BPF filter requires libseccomp crate. \
          Install: `cargo add libseccomp`. \
          The policy definitions are ready for integration."
-            .to_string(),
-    )
+        .to_string())
 }
 
 #[cfg(not(target_os = "linux"))]

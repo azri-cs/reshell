@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{CompactResult, diff};
+use super::{diff, CompactResult};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CompactView {
@@ -119,7 +119,12 @@ mod tests {
 
     #[test]
     fn renders_diff_view_with_previous_output() {
-        let rendered = render_view("line1\nline3", CompactView::Diff, Some("line1\nline2"), None);
+        let rendered = render_view(
+            "line1\nline3",
+            CompactView::Diff,
+            Some("line1\nline2"),
+            None,
+        );
         assert_eq!(rendered.content, "line3");
     }
 }

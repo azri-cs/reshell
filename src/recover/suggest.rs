@@ -1,6 +1,6 @@
+use super::strategies::Suggestion;
 use crate::classify::taxonomy::RecoveryCode;
 use crate::env::Detector;
-use super::strategies::Suggestion;
 
 pub fn suggest(
     code: RecoveryCode,
@@ -42,7 +42,12 @@ pub fn suggest(
             Suggestion {
                 action: "install_missing_tool".to_string(),
                 command: install_cmd,
-                confidence: if detector.package_manager.is_some() { "high" } else { "medium" }.to_string(),
+                confidence: if detector.package_manager.is_some() {
+                    "high"
+                } else {
+                    "medium"
+                }
+                .to_string(),
                 reason: format!("`{}` not found in $PATH.", cmd),
             }
         }
@@ -50,7 +55,8 @@ pub fn suggest(
             action: "chunked_execution".to_string(),
             command: None,
             confidence: "medium".to_string(),
-            reason: "Command timed out. Consider increasing timeout or running in smaller chunks.".to_string(),
+            reason: "Command timed out. Consider increasing timeout or running in smaller chunks."
+                .to_string(),
         },
         RecoveryCode::R24 => Suggestion {
             action: "run_diagnostic".to_string(),
@@ -62,7 +68,8 @@ pub fn suggest(
             action: "use_posix".to_string(),
             command: None,
             confidence: "medium".to_string(),
-            reason: "Environment mismatch detected. Use POSIX-compliant or shell-native syntax.".to_string(),
+            reason: "Environment mismatch detected. Use POSIX-compliant or shell-native syntax."
+                .to_string(),
         },
         RecoveryCode::R26 => Suggestion {
             action: "scope_output".to_string(),
@@ -132,7 +139,12 @@ mod tests {
 
     #[test]
     fn r20_suggests_help() {
-        let s = suggest(RecoveryCode::R20, "grep --bad-flag foo", "", &default_detector());
+        let s = suggest(
+            RecoveryCode::R20,
+            "grep --bad-flag foo",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "check_usage");
         assert_eq!(s.command.as_deref(), Some("grep --help"));
         assert_eq!(s.confidence, "high");
@@ -140,7 +152,12 @@ mod tests {
 
     #[test]
     fn r21_suggests_sudo_simple_command() {
-        let s = suggest(RecoveryCode::R21, "cat /etc/shadow", "", &default_detector());
+        let s = suggest(
+            RecoveryCode::R21,
+            "cat /etc/shadow",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "fix_permissions");
         assert_eq!(s.command.as_deref(), Some("sudo cat /etc/shadow"));
         assert_eq!(s.confidence, "medium");
@@ -148,7 +165,12 @@ mod tests {
 
     #[test]
     fn r21_sanitizes_command_with_operators() {
-        let s = suggest(RecoveryCode::R21, "cat /root/file; rm -rf /", "", &default_detector());
+        let s = suggest(
+            RecoveryCode::R21,
+            "cat /root/file; rm -rf /",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "fix_permissions");
         // Should only suggest sudo for the first word, not the full dangerous command
         assert_eq!(s.command.as_deref(), Some("sudo cat"));
@@ -174,7 +196,12 @@ mod tests {
 
     #[test]
     fn r23_suggests_chunked() {
-        let s = suggest(RecoveryCode::R23, "long-running-task", "", &default_detector());
+        let s = suggest(
+            RecoveryCode::R23,
+            "long-running-task",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "chunked_execution");
         assert!(s.command.is_none());
         assert_eq!(s.confidence, "medium");
@@ -196,7 +223,12 @@ mod tests {
 
     #[test]
     fn r24_no_diagnostic_for_unknown_tool() {
-        let s = suggest(RecoveryCode::R24, "unknown-tool build", "", &default_detector());
+        let s = suggest(
+            RecoveryCode::R24,
+            "unknown-tool build",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "run_diagnostic");
         assert!(s.command.is_none());
     }
@@ -211,9 +243,17 @@ mod tests {
 
     #[test]
     fn r26_suggests_scoping() {
-        let s = suggest(RecoveryCode::R26, "find / -name '*.log'", "", &default_detector());
+        let s = suggest(
+            RecoveryCode::R26,
+            "find / -name '*.log'",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "scope_output");
-        assert_eq!(s.command.as_deref(), Some("find / -name '*.log' | head -n 50"));
+        assert_eq!(
+            s.command.as_deref(),
+            Some("find / -name '*.log' | head -n 50")
+        );
         assert_eq!(s.confidence, "high");
     }
 
@@ -227,7 +267,12 @@ mod tests {
 
     #[test]
     fn r30_suggests_escalate() {
-        let s = suggest(RecoveryCode::R30, "mystery-command", "", &default_detector());
+        let s = suggest(
+            RecoveryCode::R30,
+            "mystery-command",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "escalate");
         assert!(s.command.is_none());
         assert_eq!(s.confidence, "low");

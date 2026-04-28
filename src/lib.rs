@@ -1,10 +1,10 @@
-pub mod cli;
-pub mod mcp;
-pub mod exec;
 pub mod classify;
-pub mod recover;
+pub mod cli;
 pub mod compact;
-pub mod memory;
 pub mod env;
+pub mod exec;
+pub mod mcp;
+pub mod memory;
+pub mod recover;
 pub mod sandbox;
 pub mod utils;

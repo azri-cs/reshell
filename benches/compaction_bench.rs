@@ -9,7 +9,10 @@ fn generate_large_output(lines: usize) -> String {
         } else if i % 50 == 0 {
             s.push_str(&format!("ERROR something went wrong at line {}\n", i));
         } else {
-            s.push_str(&format!("INFO line {} log message here with some padding\n", i));
+            s.push_str(&format!(
+                "INFO line {} log message here with some padding\n",
+                i
+            ));
         }
     }
     s

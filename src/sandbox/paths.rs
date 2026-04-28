@@ -19,9 +19,14 @@ pub fn validate_file_path(file_path: &str) -> anyhow::Result<PathBuf> {
     // Block absolute paths to sensitive system locations
     if path.is_absolute() {
         let blocked_prefixes = [
-            "/etc/shadow", "/etc/passwd", "/etc/ssh",
-            "/proc", "/sys", "/dev",
-            "/root/.ssh", "/home",
+            "/etc/shadow",
+            "/etc/passwd",
+            "/etc/ssh",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/root/.ssh",
+            "/home",
         ];
         // Allow paths under CWD even if absolute
         let cwd = std::env::current_dir().unwrap_or_default();
@@ -69,9 +74,8 @@ pub fn validate_and_read_file(file_path: &str) -> anyhow::Result<(PathBuf, Strin
 
     // Open the file immediately — the file handle is bound to the inode,
     // so a subsequent symlink swap cannot redirect the read.
-    let content = std::fs::read_to_string(&canonical).map_err(|e| {
-        anyhow::anyhow!("Failed to read file {}: {}", canonical.display(), e)
-    })?;
+    let content = std::fs::read_to_string(&canonical)
+        .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", canonical.display(), e))?;
 
     Ok((canonical, content))
 }

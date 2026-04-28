@@ -187,7 +187,8 @@ fn test_cross_shell_classification_matches_expected_codes() {
         let timed_out = case.exit_code == 124;
         let result = classify(case.exit_code, &normalized, "", timed_out, "");
         assert_eq!(
-            result.code, case.expected_code,
+            result.code,
+            case.expected_code,
             "Case {}: raw=`{}` exit={} expected={:?} got={:?} (normalized=`{}` reason=`{}`)",
             i + 1,
             case.raw,
@@ -204,7 +205,10 @@ fn test_cross_shell_classification_matches_expected_codes() {
 fn test_ansi_stripped_before_normalization() {
     let input = "\x1b[1;31merror:\x1b[0m something failed";
     let normalized = normalize_stderr(input);
-    assert!(!normalized.contains("\x1b"), "ANSI escape codes should be stripped");
+    assert!(
+        !normalized.contains("\x1b"),
+        "ANSI escape codes should be stripped"
+    );
     assert!(normalized.contains("error: something failed"));
 }
 
@@ -212,6 +216,9 @@ fn test_ansi_stripped_before_normalization() {
 fn test_wsl_path_duplicate_slashes_normalized() {
     let input = "cannot access '//var//log//file': Permission denied";
     let normalized = normalize_stderr(input);
-    assert!(!normalized.contains("//"), "duplicate slashes should be collapsed");
+    assert!(
+        !normalized.contains("//"),
+        "duplicate slashes should be collapsed"
+    );
     assert!(normalized.contains("/var/log/file"));
 }
