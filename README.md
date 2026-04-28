@@ -152,7 +152,7 @@ Execute a shell command with resilient failure handling.
 | Field | Meaning |
 |-------|---------|
 | `output_id` | ID of stored stdout in the pattern DB (use with `rsh_compact` when `truncated` is true). |
-| `next_action` | Suggested follow-up MCP tool name, parameters, and reason (e.g. call `rsh_recover`). |
+| `next_action` | Suggested follow-up MCP tool name, parameters, and reason (e.g. call `rsh_recover`). On failure, `params` includes **`stderr`** (normalized, capped) so `rsh_recover` can reuse the same **learned patterns** as `rsh_exec`. |
 | `compaction_hint` | When stdout was truncated, how to call `rsh_compact` with `output_id` and a suggested view. |
 | `platform` | Host platform string for pattern matching context. |
 | `warnings` | Non-fatal notices (e.g. security-related). |
@@ -165,16 +165,19 @@ Detect and describe the current shell environment (shell type, OS, available too
 
 ### `rsh_recover`
 
-Apply a deterministic recovery strategy for a known failure class.
+Apply a deterministic recovery strategy for a known failure class. When **`stderr`** is set (e.g. copy `next_action.params.stderr` from a failed `rsh_exec`), lookups use the same SQLite pattern memory as exec; otherwise only `context` is used (often the short classification reason).
 
 **Input Schema:**
 ```json
 {
   "recovery_code": "R22",
   "original_command": "gh pr view",
-  "context": ""
+  "context": "",
+  "stderr": ""
 }
 ```
+
+`stderr` is optional. Prefer passing it when you have it so learned fixes (`reuse_learned_fix`) can match.
 
 ### `rsh_compact`
 

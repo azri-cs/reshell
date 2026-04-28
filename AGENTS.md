@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Start here
-- Single-package Rust crate (`Cargo.toml`) → one binary: `rsh`. No workspace, no CI config, no rustfmt/clippy config. Use plain Cargo commands.
+- Single-package Rust crate (`Cargo.toml`) → one binary: `rsh`. No workspace; CI runs `fmt`, `clippy -D warnings`, and tests (`.github/workflows/ci.yml`). Use plain Cargo commands locally.
 - `target/` is present in the repo. Search `src/`, `tests/`, and `benches/` explicitly; never edit `target/`.
 
 ## Entrypoints
@@ -32,11 +32,13 @@
 - `README.md` and `RESHELL_PLAN.md` can drift; verify against `src/**` before claiming a feature exists. Taxonomy codes: `src/classify/taxonomy.rs`. MCP tool names and schemas: `src/mcp/tools.rs` (`list_tools`).
 - Aspirational / not implemented: OverlayFS sandbox, binary output detection, jq-like extraction, SSE transport (see `RESHELL_PLAN.md`).
 - The MCP server is **newline-delimited JSON-RPC over stdio** (`src/mcp/server.rs` reads `stdin.lines()`), not header-framed stdio MCP. Keep tests/clients aligned unless you upgrade the transport.
+- **`McpServer::new()`** returns `anyhow::Result` if `~/.reshell/patterns.db` cannot be opened (library embedders: handle errors instead of assuming infallible startup).
+- **`rsh_recover`** tool: optional `stderr` in arguments (see `list_tools`); exec failures put a stderr snippet on **`next_action.params`** for pattern lookup. Same suggestion path as `src/exec/runner.rs` via `src/recover/resolve.rs`.
 - The "safety sandbox" is pre-exec validation (patterns, interactive commands), optional `~/.reshell/allowlist.toml` command allowlist (`src/sandbox/allowlist.rs`), and stderr secret scrubbing (`src/sandbox/scrubber.rs`). No filesystem or network isolation exists.
 
 ## Pattern memory
-- State lives at `~/.reshell/patterns.db` (SQLite, created automatically via `rusqlite` with bundled feature).
-- On failure, the runner looks up `find_pattern(command_template, stderr)` and reuses learned fixes with `fix_success_rate >= 0.5`.
+- State lives at `~/.reshell/patterns.db` (SQLite, created automatically via `rusqlite` with bundled feature). DB work runs in **`spawn_blocking`** (`src/memory/store.rs`) so async callers are not stalled on the mutex.
+- On failure, the runner and **`rsh_recover`** look up `find_pattern(command_template, stderr)` and reuse learned fixes with `fix_success_rate >= 0.5`.
 - On non-success, non-R10 results where no pattern exists, a new pattern is saved. `save_pattern` upserts by `(command_template, stderr_pattern)` and increments `usage_count`.
 
 ## Testing / state gotchas
