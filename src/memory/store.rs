@@ -1,9 +1,11 @@
-use rusqlite::{Connection, params};
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use super::pattern::{Pattern, current_platform_tag};
+use super::pattern::{current_platform_tag, Pattern};
 use chrono::Utc;
+use rusqlite::{params, Connection};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+/// Cap stored command outputs to limit database growth (oldest rows pruned after insert).
+const MAX_STORED_OUTPUT_ROWS: usize = 5000;
 
 #[derive(Clone)]
 pub struct Store {
@@ -26,7 +28,7 @@ impl Store {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;"
+             PRAGMA busy_timeout = 5000;",
         )?;
         Self::set_restrictive_permissions(&path);
         conn.execute(
@@ -45,7 +47,10 @@ impl Store {
             [],
         )?;
         // Migration: add platform_tag column if missing from older DBs
-        let _ = conn.execute("ALTER TABLE patterns ADD COLUMN platform_tag TEXT DEFAULT 'unknown'", []);
+        let _ = conn.execute(
+            "ALTER TABLE patterns ADD COLUMN platform_tag TEXT DEFAULT 'unknown'",
+            [],
+        );
         let _ = conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_template_stderr
              ON patterns(command_template, stderr_pattern)",
@@ -87,7 +92,23 @@ impl Store {
             )",
             [],
         )?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    async fn run_db<F, R>(&self, f: F) -> anyhow::Result<R>
+    where
+        F: FnOnce(&Connection) -> anyhow::Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            f(&guard)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("database task join: {}", e))?
     }
 
     pub fn next_output_id(&self) -> String {
@@ -99,60 +120,86 @@ impl Store {
         command_template: &str,
         stderr: &str,
     ) -> anyhow::Result<Option<Pattern>> {
-        let conn = self.conn.lock().await;
-        let platform = current_platform_tag();
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
-                    fix_command, fix_success_rate, last_used, usage_count, platform_tag
-               FROM patterns
-              WHERE command_template = ?1
-                AND (?2 LIKE '%' || stderr_pattern || '%' OR stderr_pattern LIKE '%' || ?2 || '%')
-              ORDER BY (platform_tag = ?3) DESC, fix_success_rate DESC, usage_count DESC
-              LIMIT 1"
-        )?;
-        let mut rows = stmt.query(params![command_template, stderr, platform])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(Pattern {
-                id: row.get(0)?,
-                command_hash: row.get(1)?,
-                command_template: row.get(2)?,
-                recovery_code: row.get(3)?,
-                stderr_pattern: row.get(4)?,
-                fix_command: row.get(5)?,
-                fix_success_rate: row.get(6)?,
-                last_used: row.get(7)?,
-                usage_count: row.get(8)?,
-                platform_tag: row.get(9)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        let command_template = command_template.to_string();
+        let stderr = stderr.to_string();
+        self.run_db(move |conn| {
+            let platform = current_platform_tag();
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
+                        fix_command, fix_success_rate, last_used, usage_count, platform_tag
+                   FROM patterns
+                  WHERE command_template = ?1
+                    AND length(?2) > 0
+                    AND length(stderr_pattern) > 0
+                    AND ?2 LIKE '%' || stderr_pattern || '%'
+                  ORDER BY (platform_tag = ?3) DESC, fix_success_rate DESC, usage_count DESC
+                  LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![command_template, stderr, platform])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(Pattern {
+                    id: row.get(0)?,
+                    command_hash: row.get(1)?,
+                    command_template: row.get(2)?,
+                    recovery_code: row.get(3)?,
+                    stderr_pattern: row.get(4)?,
+                    fix_command: row.get(5)?,
+                    fix_success_rate: row.get(6)?,
+                    last_used: row.get(7)?,
+                    usage_count: row.get(8)?,
+                    platform_tag: row.get(9)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
     }
 
     pub async fn save_pattern(&self, pattern: &Pattern) -> anyhow::Result<()> {
-        let conn = self.conn.lock().await;
+        let pattern = pattern.clone();
+        self.run_db(move |conn| {
+            conn.execute(
+                "INSERT INTO patterns (command_hash, command_template, recovery_code, stderr_pattern,
+                                       fix_command, fix_success_rate, last_used, usage_count, platform_tag)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  ON CONFLICT(command_template, stderr_pattern) DO UPDATE SET
+                     recovery_code = excluded.recovery_code,
+                     fix_command = excluded.fix_command,
+                     fix_success_rate = excluded.fix_success_rate,
+                     last_used = excluded.last_used,
+                     usage_count = usage_count + 1,
+                     platform_tag = excluded.platform_tag",
+                params![
+                    &pattern.command_hash,
+                    &pattern.command_template,
+                    &pattern.recovery_code,
+                    &pattern.stderr_pattern,
+                    pattern.fix_command.as_ref(),
+                    pattern.fix_success_rate,
+                    Utc::now().to_rfc3339(),
+                    pattern.usage_count,
+                    pattern.platform_tag.as_deref().unwrap_or("unknown"),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    fn prune_old_outputs(conn: &Connection) -> anyhow::Result<()> {
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM outputs", [], |row| row.get(0))?;
+        if count <= MAX_STORED_OUTPUT_ROWS as i64 {
+            return Ok(());
+        }
+        let excess = count - MAX_STORED_OUTPUT_ROWS as i64;
         conn.execute(
-            "INSERT INTO patterns (command_hash, command_template, recovery_code, stderr_pattern,
-                                   fix_command, fix_success_rate, last_used, usage_count, platform_tag)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-              ON CONFLICT(command_template, stderr_pattern) DO UPDATE SET
-                 recovery_code = excluded.recovery_code,
-                 fix_command = excluded.fix_command,
-                 fix_success_rate = excluded.fix_success_rate,
-                 last_used = excluded.last_used,
-                 usage_count = usage_count + 1,
-                 platform_tag = excluded.platform_tag",
-            params![
-                &pattern.command_hash,
-                &pattern.command_template,
-                &pattern.recovery_code,
-                &pattern.stderr_pattern,
-                pattern.fix_command.as_ref(),
-                pattern.fix_success_rate,
-                Utc::now().to_rfc3339(),
-                pattern.usage_count,
-                pattern.platform_tag.as_deref().unwrap_or("unknown"),
-            ],
+            "DELETE FROM outputs WHERE rowid IN (
+                SELECT rowid FROM outputs
+                ORDER BY datetime(created_at) ASC, rowid ASC
+                LIMIT ?1
+            )",
+            params![excess],
         )?;
         Ok(())
     }
@@ -165,90 +212,113 @@ impl Store {
         stderr: &str,
         exit_code: i32,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO outputs (output_id, original_command, stdout, stderr, exit_code)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(output_id) DO UPDATE SET
-                stdout = excluded.stdout,
-                stderr = excluded.stderr,
-                exit_code = excluded.exit_code",
-            params![output_id, original_command, stdout, stderr, exit_code],
-        )?;
-        Ok(())
+        let output_id = output_id.to_string();
+        let original_command = original_command.to_string();
+        let stdout = stdout.to_string();
+        let stderr = stderr.to_string();
+        self.run_db(move |conn| {
+            conn.execute(
+                "INSERT INTO outputs (output_id, original_command, stdout, stderr, exit_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(output_id) DO UPDATE SET
+                    stdout = excluded.stdout,
+                    stderr = excluded.stderr,
+                    exit_code = excluded.exit_code",
+                params![output_id, original_command, stdout, stderr, exit_code],
+            )?;
+            Self::prune_old_outputs(conn)?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn get_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare_cached(
-            "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
-             FROM outputs WHERE output_id = ?1"
-        )?;
-        let mut rows = stmt.query(params![output_id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(StoredOutput {
-                output_id: row.get(0)?,
-                original_command: row.get(1)?,
-                stdout: row.get(2)?,
-                stderr: row.get(3)?,
-                exit_code: row.get(4)?,
-                created_at: row.get(5)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        let output_id = output_id.to_string();
+        self.run_db(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
+                 FROM outputs WHERE output_id = ?1",
+            )?;
+            let mut rows = stmt.query(params![output_id])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(StoredOutput {
+                    output_id: row.get(0)?,
+                    original_command: row.get(1)?,
+                    stdout: row.get(2)?,
+                    stderr: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    created_at: row.get(5)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
     }
 
     pub async fn previous_output(&self, output_id: &str) -> anyhow::Result<Option<StoredOutput>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare_cached(
-            "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
-             FROM outputs
-             WHERE rowid < (SELECT rowid FROM outputs WHERE output_id = ?1)
-             ORDER BY rowid DESC
-             LIMIT 1"
-        )?;
-        let mut rows = stmt.query(params![output_id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(StoredOutput {
-                output_id: row.get(0)?,
-                original_command: row.get(1)?,
-                stdout: row.get(2)?,
-                stderr: row.get(3)?,
-                exit_code: row.get(4)?,
-                created_at: row.get(5)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        let output_id = output_id.to_string();
+        self.run_db(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT o.output_id, o.original_command, o.stdout, o.stderr, o.exit_code, o.created_at
+                 FROM outputs o
+                 WHERE (
+                   o.created_at < (SELECT created_at FROM outputs WHERE output_id = ?1)
+                   OR (
+                     o.created_at = (SELECT created_at FROM outputs WHERE output_id = ?1)
+                     AND o.rowid < (SELECT rowid FROM outputs WHERE output_id = ?1)
+                   )
+                 )
+                 ORDER BY o.created_at DESC, o.rowid DESC
+                 LIMIT 1"
+            )?;
+            let mut rows = stmt.query(params![output_id])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(StoredOutput {
+                    output_id: row.get(0)?,
+                    original_command: row.get(1)?,
+                    stdout: row.get(2)?,
+                    stderr: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    created_at: row.get(5)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
     }
 
     pub async fn latest_output(&self) -> anyhow::Result<Option<StoredOutput>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare_cached(
-            "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
-             FROM outputs ORDER BY created_at DESC, rowid DESC LIMIT 1"
-        )?;
-        let mut rows = stmt.query([])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(StoredOutput {
-                output_id: row.get(0)?,
-                original_command: row.get(1)?,
-                stdout: row.get(2)?,
-                stderr: row.get(3)?,
-                exit_code: row.get(4)?,
-                created_at: row.get(5)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        self.run_db(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
+                 FROM outputs ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            )?;
+            let mut rows = stmt.query([])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(StoredOutput {
+                    output_id: row.get(0)?,
+                    original_command: row.get(1)?,
+                    stdout: row.get(2)?,
+                    stderr: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    created_at: row.get(5)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
     }
 
     pub async fn pattern_count(&self) -> anyhow::Result<i64> {
-        let conn = self.conn.lock().await;
-        let count = conn
-            .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))?;
-        Ok(count)
+        self.run_db(|conn| {
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))?;
+            Ok(count)
+        })
+        .await
     }
 
     pub async fn find_pattern_exact(
@@ -256,31 +326,35 @@ impl Store {
         command_template: &str,
         stderr_pattern: &str,
     ) -> anyhow::Result<Option<Pattern>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
-                    fix_command, fix_success_rate, last_used, usage_count, platform_tag
-             FROM patterns
-             WHERE command_template = ?1 AND stderr_pattern = ?2
-             LIMIT 1"
-        )?;
-        let mut rows = stmt.query(params![command_template, stderr_pattern])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(Pattern {
-                id: row.get(0)?,
-                command_hash: row.get(1)?,
-                command_template: row.get(2)?,
-                recovery_code: row.get(3)?,
-                stderr_pattern: row.get(4)?,
-                fix_command: row.get(5)?,
-                fix_success_rate: row.get(6)?,
-                last_used: row.get(7)?,
-                usage_count: row.get(8)?,
-                platform_tag: row.get(9)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        let command_template = command_template.to_string();
+        let stderr_pattern = stderr_pattern.to_string();
+        self.run_db(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, command_hash, command_template, recovery_code, stderr_pattern,
+                        fix_command, fix_success_rate, last_used, usage_count, platform_tag
+                 FROM patterns
+                 WHERE command_template = ?1 AND stderr_pattern = ?2
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![command_template, stderr_pattern])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(Pattern {
+                    id: row.get(0)?,
+                    command_hash: row.get(1)?,
+                    command_template: row.get(2)?,
+                    recovery_code: row.get(3)?,
+                    stderr_pattern: row.get(4)?,
+                    fix_command: row.get(5)?,
+                    fix_success_rate: row.get(6)?,
+                    last_used: row.get(7)?,
+                    usage_count: row.get(8)?,
+                    platform_tag: row.get(9)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
     }
 
     /// Log a recovery suggestion being served to the agent.
@@ -290,30 +364,37 @@ impl Store {
         original_command: &str,
         suggested_action: &str,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO recovery_attempts (recovery_code, original_command, suggested_action)
-             VALUES (?1, ?2, ?3)",
-            params![recovery_code, original_command, suggested_action],
-        )?;
-        Ok(())
+        let recovery_code = recovery_code.to_string();
+        let original_command = original_command.to_string();
+        let suggested_action = suggested_action.to_string();
+        self.run_db(move |conn| {
+            conn.execute(
+                "INSERT INTO recovery_attempts (recovery_code, original_command, suggested_action)
+                 VALUES (?1, ?2, ?3)",
+                params![recovery_code, original_command, suggested_action],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// Count recovery attempts grouped by recovery code (for diagnostics).
     pub async fn recovery_attempt_counts(&self) -> anyhow::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare_cached(
-            "SELECT recovery_code, COUNT(*) as cnt
-             FROM recovery_attempts
-             GROUP BY recovery_code
-             ORDER BY cnt DESC"
-        )?;
-        let mut results = Vec::new();
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            results.push((row.get(0)?, row.get(1)?));
-        }
-        Ok(results)
+        self.run_db(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT recovery_code, COUNT(*) as cnt
+                 FROM recovery_attempts
+                 GROUP BY recovery_code
+                 ORDER BY cnt DESC",
+            )?;
+            let mut results = Vec::new();
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                results.push((row.get(0)?, row.get(1)?));
+            }
+            Ok(results)
+        })
+        .await
     }
 
     /// Log a command execution for audit purposes.
@@ -326,47 +407,55 @@ impl Store {
         recovery_code: &str,
         validation_passed: bool,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO audit_log (command_hash, command_template, cwd, exit_code, recovery_code, validation_passed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                command_hash,
-                command_template,
-                cwd.unwrap_or(""),
-                exit_code,
-                recovery_code,
-                validation_passed,
-            ],
-        )?;
-        Ok(())
+        let command_hash = command_hash.to_string();
+        let command_template = command_template.to_string();
+        let cwd = cwd.unwrap_or("").to_string();
+        let recovery_code = recovery_code.to_string();
+        self.run_db(move |conn| {
+            conn.execute(
+                "INSERT INTO audit_log (command_hash, command_template, cwd, exit_code, recovery_code, validation_passed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    command_hash,
+                    command_template,
+                    cwd,
+                    exit_code,
+                    recovery_code,
+                    validation_passed,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// Get recent audit log entries.
     pub async fn recent_audit_entries(&self, limit: i64) -> anyhow::Result<Vec<AuditEntry>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, command_hash, command_template, cwd, exit_code, recovery_code,
-                    validation_passed, executed_at
-             FROM audit_log
-             ORDER BY executed_at DESC
-             LIMIT ?1"
-        )?;
-        let mut entries = Vec::new();
-        let mut rows = stmt.query(params![limit])?;
-        while let Some(row) = rows.next()? {
-            entries.push(AuditEntry {
-                id: row.get(0)?,
-                command_hash: row.get(1)?,
-                command_template: row.get(2)?,
-                cwd: row.get(3)?,
-                exit_code: row.get(4)?,
-                recovery_code: row.get(5)?,
-                validation_passed: row.get(6)?,
-                executed_at: row.get(7)?,
-            });
-        }
-        Ok(entries)
+        self.run_db(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, command_hash, command_template, cwd, exit_code, recovery_code,
+                        validation_passed, executed_at
+                 FROM audit_log
+                 ORDER BY executed_at DESC
+                 LIMIT ?1",
+            )?;
+            let mut entries = Vec::new();
+            let mut rows = stmt.query(params![limit])?;
+            while let Some(row) = rows.next()? {
+                entries.push(AuditEntry {
+                    id: row.get(0)?,
+                    command_hash: row.get(1)?,
+                    command_template: row.get(2)?,
+                    cwd: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    recovery_code: row.get(5)?,
+                    validation_passed: row.get(6)?,
+                    executed_at: row.get(7)?,
+                });
+            }
+            Ok(entries)
+        })
+        .await
     }
 
     /// Set 0600 permissions on the database file (owner read/write only).
@@ -374,7 +463,10 @@ impl Store {
     fn set_restrictive_permissions(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            eprintln!("Warning: failed to set restrictive permissions on database: {}", e);
+            eprintln!(
+                "Warning: failed to set restrictive permissions on database: {}",
+                e
+            );
         }
     }
 
@@ -422,7 +514,10 @@ mod tests {
     async fn save_and_get_output() {
         let (store, _dir) = test_store();
         let id = store.next_output_id();
-        store.save_output(&id, "echo hello", "hello\n", "", 0).await.unwrap();
+        store
+            .save_output(&id, "echo hello", "hello\n", "", 0)
+            .await
+            .unwrap();
         let output = store.get_output(&id).await.unwrap().unwrap();
         assert_eq!(output.stdout, "hello\n");
         assert_eq!(output.exit_code, 0);
@@ -451,11 +546,37 @@ mod tests {
             platform_tag: Some("linux".to_string()),
         };
         store.save_pattern(&pattern).await.unwrap();
-        let found = store.find_pattern("cargo test", "test FAILED").await.unwrap();
+        let found = store
+            .find_pattern("cargo test", "test FAILED")
+            .await
+            .unwrap();
         assert!(found.is_some());
         let found = found.unwrap();
         assert_eq!(found.recovery_code, "R24");
-        assert_eq!(found.fix_command, Some("cargo test -- --nocapture".to_string()));
+        assert_eq!(
+            found.fix_command,
+            Some("cargo test -- --nocapture".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn find_pattern_empty_stderr_matches_nothing() {
+        let (store, _dir) = test_store();
+        let pattern = Pattern {
+            id: None,
+            command_hash: "h".to_string(),
+            command_template: "echo hi".to_string(),
+            recovery_code: "R24".to_string(),
+            stderr_pattern: "x".to_string(),
+            fix_command: None,
+            fix_success_rate: 0.0,
+            last_used: Some(Utc::now()),
+            usage_count: 1,
+            platform_tag: Some("linux".to_string()),
+        };
+        store.save_pattern(&pattern).await.unwrap();
+        let found = store.find_pattern("echo hi", "").await.unwrap();
+        assert!(found.is_none());
     }
 
     #[tokio::test]
@@ -486,7 +607,10 @@ mod tests {
     #[tokio::test]
     async fn log_audit_entry_works() {
         let (store, _dir) = test_store();
-        store.log_audit_entry("hash123", "echo hello", Some("/tmp"), 0, "R10", true).await.unwrap();
+        store
+            .log_audit_entry("hash123", "echo hello", Some("/tmp"), 0, "R10", true)
+            .await
+            .unwrap();
         let entries = store.recent_audit_entries(10).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].recovery_code, "R10");
@@ -495,7 +619,10 @@ mod tests {
     #[tokio::test]
     async fn log_recovery_attempt_works() {
         let (store, _dir) = test_store();
-        store.log_recovery_attempt("R22", "gh pr view", "install gh").await.unwrap();
+        store
+            .log_recovery_attempt("R22", "gh pr view", "install gh")
+            .await
+            .unwrap();
         let counts = store.recovery_attempt_counts().await.unwrap();
         assert_eq!(counts.len(), 1);
         assert_eq!(counts[0].0, "R22");
@@ -506,9 +633,15 @@ mod tests {
     async fn latest_output_returns_most_recent() {
         let (store, _dir) = test_store();
         let id1 = store.next_output_id();
-        store.save_output(&id1, "first", "out1", "", 0).await.unwrap();
+        store
+            .save_output(&id1, "first", "out1", "", 0)
+            .await
+            .unwrap();
         let id2 = store.next_output_id();
-        store.save_output(&id2, "second", "out2", "", 0).await.unwrap();
+        store
+            .save_output(&id2, "second", "out2", "", 0)
+            .await
+            .unwrap();
         let latest = store.latest_output().await.unwrap().unwrap();
         assert_eq!(latest.stdout, "out2");
     }
@@ -517,9 +650,15 @@ mod tests {
     async fn previous_output_returns_prior() {
         let (store, _dir) = test_store();
         let id1 = store.next_output_id();
-        store.save_output(&id1, "first", "out1", "", 0).await.unwrap();
+        store
+            .save_output(&id1, "first", "out1", "", 0)
+            .await
+            .unwrap();
         let id2 = store.next_output_id();
-        store.save_output(&id2, "second", "out2", "", 0).await.unwrap();
+        store
+            .save_output(&id2, "second", "out2", "", 0)
+            .await
+            .unwrap();
         let prev = store.previous_output(&id2).await.unwrap().unwrap();
         assert_eq!(prev.stdout, "out1");
     }
