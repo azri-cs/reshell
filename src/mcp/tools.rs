@@ -1,13 +1,13 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::collections::HashMap;
 
-use crate::exec::{ExecRequest, runner::Runner};
-use crate::env::Detector;
 use crate::classify::taxonomy::RecoveryCode;
-use crate::recover::suggest;
-use crate::compact::view::{CompactView, render_view};
+use crate::compact::view::{render_view, CompactView};
+use crate::env::Detector;
+use crate::exec::{runner::Runner, ExecRequest};
+use crate::recover::resolve::resolve_suggestion;
 use crate::sandbox::paths;
 
 use super::server::ServerState;
@@ -56,7 +56,8 @@ pub fn list_tools() -> Vec<Value> {
                 "properties": {
                     "recovery_code": { "type": "string", "description": "Recovery code from rsh_exec response (R20-R30)" },
                     "original_command": { "type": "string", "description": "The command that failed (from rsh_exec original_command)" },
-                    "context": { "type": "string", "description": "Optional additional context about the failure" }
+                    "context": { "type": "string", "description": "Optional additional context about the failure" },
+                    "stderr": { "type": "string", "description": "Normalized stderr from rsh_exec (pass next_action.stderr when present) for learned-pattern lookup" }
                 },
                 "required": ["recovery_code", "original_command"]
             }
@@ -84,17 +85,23 @@ pub fn list_tools() -> Vec<Value> {
     ]
 }
 
-pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<Mutex<ServerState>>) -> ToolResponse {
+pub(crate) async fn handle_tool_call(
+    name: &str,
+    arguments: Value,
+    state: &Arc<Mutex<ServerState>>,
+) -> ToolResponse {
     match name {
         "rsh_exec" => {
             let wrapper = match serde_json::from_value::<ExecRequestWrapper>(arguments) {
                 Ok(w) => w,
-                Err(e) => return ToolResponse {
-                    status: "error".to_string(),
-                    error: Some(format!("Invalid arguments: {}", e)),
-                    data: None,
-                    is_error: true,
-                },
+                Err(e) => {
+                    return ToolResponse {
+                        status: "error".to_string(),
+                        error: Some(format!("Invalid arguments: {}", e)),
+                        data: None,
+                        is_error: true,
+                    }
+                }
             };
             let req = ExecRequest {
                 command: wrapper.command,
@@ -138,10 +145,15 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                 let s = state.lock().await;
                 s.store.clone()
             };
-            let pattern_count = store.pattern_count().await.unwrap_or(0);
+            let (pattern_count, store_status) = match store.pattern_count().await {
+                Ok(n) => (n, "ok".to_string()),
+                Err(e) => (0, format!("degraded: {}", e)),
+            };
+            let healthy = store_status == "ok";
 
             let guidance = json!({
-                "status": "healthy",
+                "status": if healthy { "healthy" } else { "degraded" },
+                "store": store_status,
                 "environment": {
                     "os": detector.os,
                     "shell": detector.shell,
@@ -172,39 +184,72 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                 "learned_patterns": pattern_count,
             });
             ToolResponse {
-                status: "success".to_string(),
-                error: None,
+                status: if healthy {
+                    "success".to_string()
+                } else {
+                    "degraded".to_string()
+                },
+                error: if healthy {
+                    None
+                } else {
+                    Some("Pattern store unavailable; rsh_exec may not persist outputs.".to_string())
+                },
                 data: Some(guidance),
-                is_error: false,
+                is_error: !healthy,
             }
         }
         "rsh_recover" => {
             let req = match serde_json::from_value::<RecoverRequest>(arguments) {
                 Ok(r) => r,
-                Err(e) => return ToolResponse {
-                    status: "error".to_string(),
-                    error: Some(format!("Invalid arguments: {}", e)),
-                    data: None,
-                    is_error: true,
-                },
+                Err(e) => {
+                    return ToolResponse {
+                        status: "error".to_string(),
+                        error: Some(format!("Invalid arguments: {}", e)),
+                        data: None,
+                        is_error: true,
+                    }
+                }
             };
             let code = parse_recovery_code(&req.recovery_code);
             let detector = Detector::cached().await.clone();
-            let suggestion = suggest::suggest(
+            let context = req.context.unwrap_or_default();
+            let store = {
+                let s = state.lock().await;
+                s.store.clone()
+            };
+            let resolved = match resolve_suggestion(
+                &store,
                 code,
                 &req.original_command,
-                &req.context.unwrap_or_default(),
+                &context,
+                req.stderr.as_deref(),
                 &detector,
-            );
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return ToolResponse {
+                        status: "error".to_string(),
+                        error: Some(format!("Recovery failed: {}", e)),
+                        data: None,
+                        is_error: true,
+                    };
+                }
+            };
+            let suggestion = resolved.suggestion;
 
             // Log telemetry
             {
                 let s = state.lock().await;
-                let _ = s.store.log_recovery_attempt(
-                    &req.recovery_code,
-                    &req.original_command,
-                    &suggestion.action,
-                ).await;
+                let _ = s
+                    .store
+                    .log_recovery_attempt(
+                        &req.recovery_code,
+                        &req.original_command,
+                        &suggestion.action,
+                    )
+                    .await;
             }
 
             ToolResponse {
@@ -217,12 +262,14 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
         "rsh_compact" => {
             let req = match serde_json::from_value::<CompactRequest>(arguments) {
                 Ok(r) => r,
-                Err(e) => return ToolResponse {
-                    status: "error".to_string(),
-                    error: Some(format!("Invalid arguments: {}", e)),
-                    data: None,
-                    is_error: true,
-                },
+                Err(e) => {
+                    return ToolResponse {
+                        status: "error".to_string(),
+                        error: Some(format!("Invalid arguments: {}", e)),
+                        data: None,
+                        is_error: true,
+                    }
+                }
             };
             let store = {
                 let s = state.lock().await;
@@ -252,11 +299,21 @@ pub(crate) async fn handle_tool_call(name: &str, arguments: Value, state: &Arc<M
                 match store.get_output(&output_id).await {
                     Ok(Some(output)) => {
                         let previous = if matches!(view, CompactView::Diff) {
-                            store.previous_output(&output.output_id).await.ok().flatten().map(|previous| previous.stdout)
+                            store
+                                .previous_output(&output.output_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|previous| previous.stdout)
                         } else {
                             None
                         };
-                        let compacted = render_view(&output.stdout, view, previous.as_deref(), Some(output.output_id));
+                        let compacted = render_view(
+                            &output.stdout,
+                            view,
+                            previous.as_deref(),
+                            Some(output.output_id),
+                        );
                         ToolResponse {
                             status: "success".to_string(),
                             error: None,
@@ -324,6 +381,8 @@ struct RecoverRequest {
     recovery_code: String,
     original_command: String,
     context: Option<String>,
+    #[serde(default)]
+    stderr: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

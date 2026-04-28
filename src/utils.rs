@@ -20,6 +20,18 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Truncate `s` to at most `max_bytes` UTF-8 without splitting a multibyte codepoint.
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +94,13 @@ mod tests {
     #[test]
     fn shell_quote_empty() {
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn truncate_utf8_respects_char_boundary() {
+        let s = "é".repeat(100);
+        let t = truncate_utf8(&s, 3);
+        assert!(t.len() <= 3);
+        assert!(s.starts_with(&t) || t.is_empty());
     }
 }

@@ -1,19 +1,18 @@
-use super::{ExecRequest, ExecResult, OutputInfo, NextAction, CompactionHint, validator};
+use super::{validator, CompactionHint, ExecRequest, ExecResult, NextAction, OutputInfo};
+use crate::classify::normalize::normalize_stderr;
 use crate::classify::{classify, taxonomy::RecoveryCode};
 use crate::compact;
 use crate::env::Detector;
 use crate::memory::pattern::Pattern;
 use crate::memory::Store;
-use crate::recover::memory::pattern_to_suggestion;
-use crate::recover::suggest;
-use crate::sandbox::scrubber;
+use crate::recover::resolve::{resolve_suggestion, STDERR_PATTERN_MAX_BYTES};
 use crate::sandbox::paths;
-use crate::classify::normalize::normalize_stderr;
-use crate::utils::{hash_command, normalize_command, shell_quote};
+use crate::sandbox::scrubber;
+use crate::utils::{hash_command, normalize_command, shell_quote, truncate_utf8};
+use once_cell::sync::Lazy;
+use std::collections::HashSet;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
-use std::collections::HashSet;
-use once_cell::sync::Lazy;
 
 /// Maximum allowed timeout in seconds (10 minutes).
 const MAX_TIMEOUT_SECS: u64 = 600;
@@ -94,12 +93,18 @@ impl Runner {
                 recovery_class: RecoveryCode::R27.class_name().to_string(),
                 original_command: req.command.clone(),
                 output_id: None,
-                suggestion: serde_json::to_value(suggest::suggest(
-                    RecoveryCode::R27,
-                    &req.command,
-                    &e,
-                    &Detector::default(),
-                ))?,
+                suggestion: serde_json::to_value(
+                    resolve_suggestion(
+                        &self.store,
+                        RecoveryCode::R27,
+                        &req.command,
+                        &e,
+                        None,
+                        &Detector::default(),
+                    )
+                    .await?
+                    .suggestion,
+                )?,
                 output: OutputInfo {
                     stdout: String::new(),
                     stderr: e.clone(),
@@ -112,6 +117,7 @@ impl Runner {
                         "recovery_code": "R27",
                         "original_command": req.command,
                         "context": e,
+                        "stderr": "",
                     }),
                     reason: "Command blocked by safety validator. Use rsh_recover for an alternative approach.".to_string(),
                 }),
@@ -146,13 +152,18 @@ impl Runner {
             let attempt = self.execute_once(current_req, current_shell).await?;
             // Quick check: only classify enough to decide if retry is needed.
             // Full classification happens once after the loop on scrubbed output.
-            let should_retry = req.retry
-                && attempt_idx == 0
-                && retry_shell.is_some()
-                && {
-                    let norm = normalize_stderr(&attempt.stderr);
-                    classify(attempt.exit_code, &norm, &attempt.stdout, attempt.timed_out, &detector.shell).code == RecoveryCode::R25
-                };
+            let should_retry = req.retry && attempt_idx == 0 && retry_shell.is_some() && {
+                let norm = normalize_stderr(&attempt.stderr);
+                classify(
+                    attempt.exit_code,
+                    &norm,
+                    &attempt.stdout,
+                    attempt.timed_out,
+                    &detector.shell,
+                )
+                .code
+                    == RecoveryCode::R25
+            };
             last_attempt = Some(attempt);
             if !should_retry {
                 break;
@@ -174,17 +185,27 @@ impl Runner {
         let normalized_stderr = normalize_stderr(&scrubbed_stderr);
 
         // 4. Classify once on scrubbed+normalized stderr
-        let classification = classify(exit_code, &normalized_stderr, &scrubbed_stdout, timed_out, &detector.shell);
+        let classification = classify(
+            exit_code,
+            &normalized_stderr,
+            &scrubbed_stdout,
+            timed_out,
+            &detector.shell,
+        );
 
         // 4b. Audit log
-        if let Err(e) = self.store.log_audit_entry(
-            &hash_command(&normalize_command(&req.command)),
-            &normalize_command(&req.command),
-            req.cwd.as_deref(),
-            exit_code,
-            &classification.code.to_string(),
-            true, // validation passed
-        ).await {
+        if let Err(e) = self
+            .store
+            .log_audit_entry(
+                &hash_command(&normalize_command(&req.command)),
+                &normalize_command(&req.command),
+                req.cwd.as_deref(),
+                exit_code,
+                &classification.code.to_string(),
+                true, // validation passed
+            )
+            .await
+        {
             eprintln!("rsh: warning: failed to write audit log: {}", e);
         }
 
@@ -196,39 +217,40 @@ impl Runner {
             scrubbed_stdout
         };
 
-        // 6. Recovery suggestion
+        // 6. Recovery suggestion (learned pattern when confident, else heuristics)
         let normalized_command = normalize_command(&req.command);
-        let memory_pattern = if classification.code != RecoveryCode::R10 {
-            self.store.find_pattern(&normalized_command, &normalized_stderr).await?
-        } else {
-            None
-        };
-        let suggestion = if let Some(pattern) = memory_pattern.as_ref().filter(|pattern| {
-            pattern.fix_command.is_some() && pattern.fix_success_rate >= 0.5
-        }) {
-            pattern_to_suggestion(pattern, &req.command)
-        } else {
-            suggest::suggest(
-                classification.code,
-                &req.command,
-                &classification.reason,
-                &detector,
-            )
-        };
+        let stderr_for_recover = truncate_utf8(&normalized_stderr, STDERR_PATTERN_MAX_BYTES);
+        let resolved = resolve_suggestion(
+            &self.store,
+            classification.code,
+            &req.command,
+            &classification.reason,
+            Some(&normalized_stderr),
+            &detector,
+        )
+        .await?;
+        let suggestion = resolved.suggestion;
 
         // 7. Persist output
         let output_id = self.store.next_output_id();
-        if let Err(e) = self.store.save_output(
-            &output_id,
-            &req.command,
-            &final_stdout,
-            &scrubbed_stderr,
-            exit_code,
-        ).await {
-            eprintln!("rsh: warning: failed to persist output (output_id={}): {}", output_id, e);
+        if let Err(e) = self
+            .store
+            .save_output(
+                &output_id,
+                &req.command,
+                &final_stdout,
+                &scrubbed_stderr,
+                exit_code,
+            )
+            .await
+        {
+            eprintln!(
+                "rsh: warning: failed to persist output (output_id={}): {}",
+                output_id, e
+            );
         }
 
-        if classification.code != RecoveryCode::R10 && memory_pattern.is_none() {
+        if classification.code != RecoveryCode::R10 && !resolved.matched_pattern_row {
             let learned_pattern = Pattern {
                 id: None,
                 command_hash: hash_command(&normalized_command),
@@ -261,6 +283,7 @@ impl Runner {
                     "recovery_code": classification.code.to_string(),
                     "original_command": req.command,
                     "context": classification.reason,
+                    "stderr": stderr_for_recover,
                 }),
                 reason: format!(
                     "Command failed with {}. Use rsh_recover to get a deterministic fix suggestion.",
@@ -307,13 +330,16 @@ impl Runner {
         })
     }
 
-    async fn execute_once(&self, req: &ExecRequest, shell: &str) -> anyhow::Result<ExecutionAttempt> {
+    async fn execute_once(
+        &self,
+        req: &ExecRequest,
+        shell: &str,
+    ) -> anyhow::Result<ExecutionAttempt> {
         let mut cmd = Command::new(shell);
         cmd.arg("-c").arg(&req.command);
         if let Some(cwd) = &req.cwd {
-            let validated = paths::validate_cwd(cwd).map_err(|e| {
-                anyhow::anyhow!("CWD validation failed: {}", e)
-            })?;
+            let validated = paths::validate_cwd(cwd)
+                .map_err(|e| anyhow::anyhow!("CWD validation failed: {}", e))?;
             cmd.current_dir(validated);
         }
         let mut warnings = Vec::new();
@@ -389,7 +415,10 @@ mod tests {
         let store = test_store();
         let runner = Runner::with_store(store);
 
-        let result = runner.run(&test_request("nonexistent_command_xyz", false)).await.unwrap();
+        let result = runner
+            .run(&test_request("nonexistent_command_xyz", false))
+            .await
+            .unwrap();
 
         assert!(result.output_id.is_some());
         let count = runner.store.pattern_count().await.unwrap();
