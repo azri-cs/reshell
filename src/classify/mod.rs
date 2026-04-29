@@ -117,8 +117,8 @@ pub fn classify(
     }
 
     // Large stdout with no clearer stderr signal: suggest scoping output (R26).
-    const LARGE_STDOUT_BYTES: usize = 512 * 1024;
-    if exit_code != 0 && stdout.len() > LARGE_STDOUT_BYTES {
+    let large_stdout = crate::config::get().compaction.large_stdout_bytes;
+    if exit_code != 0 && stdout.len() > large_stdout {
         return ClassificationResult {
             code: RecoveryCode::R26,
             reason: "Very large stdout on failure; try head/tail/grep to scope output".to_string(),

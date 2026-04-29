@@ -82,14 +82,24 @@ pub fn scrub_secrets(text: &str) -> String {
         .to_string();
 
     // Third pass: entropy-based detection for unknown credential formats
-    result = scrub_high_entropy_strings(&result);
+    let cfg = crate::config::get();
+    if !cfg.scrubber.disable_entropy {
+        result = scrub_high_entropy_strings(&result, cfg.scrubber.entropy_threshold);
+    }
+
+    // Fourth pass: user-configured custom patterns
+    for pattern_str in &cfg.scrubber.additional_patterns {
+        if let Ok(re) = Regex::new(pattern_str) {
+            result = re.replace_all(&result, "[REDACTED]").to_string();
+        }
+    }
 
     result
 }
 
 /// Scan for high-entropy strings that look like base64-encoded secrets
 /// but don't match any known token prefix pattern.
-fn scrub_high_entropy_strings(text: &str) -> String {
+fn scrub_high_entropy_strings(text: &str, threshold: f64) -> String {
     let mut result = String::with_capacity(text.len());
     let mut current_candidate = String::new();
 
@@ -100,7 +110,7 @@ fn scrub_high_entropy_strings(text: &str) -> String {
             // End of candidate — check it
             if current_candidate.len() >= 32 {
                 let entropy = shannon_entropy(&current_candidate);
-                if entropy > 3.5 {
+                if entropy > threshold {
                     // High-entropy base64-like string, likely a token
                     result.push_str("[REDACTED]");
                     current_candidate.clear();

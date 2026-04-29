@@ -59,6 +59,7 @@ impl Store {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS outputs (
                 output_id TEXT PRIMARY KEY,
+                execution_id TEXT,
                 original_command TEXT NOT NULL,
                 stdout TEXT,
                 stderr TEXT,
@@ -67,6 +68,8 @@ impl Store {
             )",
             [],
         )?;
+        // Migration: add execution_id column if missing from older DBs
+        let _ = conn.execute("ALTER TABLE outputs ADD COLUMN execution_id TEXT", []);
         conn.execute(
             "CREATE TABLE IF NOT EXISTS recovery_attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,24 +210,27 @@ impl Store {
     pub async fn save_output(
         &self,
         output_id: &str,
+        execution_id: &str,
         original_command: &str,
         stdout: &str,
         stderr: &str,
         exit_code: i32,
     ) -> anyhow::Result<()> {
         let output_id = output_id.to_string();
+        let execution_id = execution_id.to_string();
         let original_command = original_command.to_string();
         let stdout = stdout.to_string();
         let stderr = stderr.to_string();
         self.run_db(move |conn| {
             conn.execute(
-                "INSERT INTO outputs (output_id, original_command, stdout, stderr, exit_code)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO outputs (output_id, execution_id, original_command, stdout, stderr, exit_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(output_id) DO UPDATE SET
+                    execution_id = excluded.execution_id,
                     stdout = excluded.stdout,
                     stderr = excluded.stderr,
                     exit_code = excluded.exit_code",
-                params![output_id, original_command, stdout, stderr, exit_code],
+                params![output_id, execution_id, original_command, stdout, stderr, exit_code],
             )?;
             Self::prune_old_outputs(conn)?;
             Ok(())
@@ -236,18 +242,49 @@ impl Store {
         let output_id = output_id.to_string();
         self.run_db(move |conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
+                "SELECT output_id, execution_id, original_command, stdout, stderr, exit_code, created_at
                  FROM outputs WHERE output_id = ?1",
             )?;
             let mut rows = stmt.query(params![output_id])?;
             if let Some(row) = rows.next()? {
                 Ok(Some(StoredOutput {
                     output_id: row.get(0)?,
-                    original_command: row.get(1)?,
-                    stdout: row.get(2)?,
-                    stderr: row.get(3)?,
-                    exit_code: row.get(4)?,
-                    created_at: row.get(5)?,
+                    execution_id: row.get(1)?,
+                    original_command: row.get(2)?,
+                    stdout: row.get(3)?,
+                    stderr: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    created_at: row.get(6)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+    }
+
+    /// Look up a stored output by its execution_id (from rsh_exec response).
+    pub async fn get_output_by_execution_id(
+        &self,
+        execution_id: &str,
+    ) -> anyhow::Result<Option<StoredOutput>> {
+        let execution_id = execution_id.to_string();
+        self.run_db(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT output_id, execution_id, original_command, stdout, stderr, exit_code, created_at
+                 FROM outputs WHERE execution_id = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![execution_id])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(StoredOutput {
+                    output_id: row.get(0)?,
+                    execution_id: row.get(1)?,
+                    original_command: row.get(2)?,
+                    stdout: row.get(3)?,
+                    stderr: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    created_at: row.get(6)?,
                 }))
             } else {
                 Ok(None)
@@ -260,7 +297,7 @@ impl Store {
         let output_id = output_id.to_string();
         self.run_db(move |conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT o.output_id, o.original_command, o.stdout, o.stderr, o.exit_code, o.created_at
+                "SELECT o.output_id, o.execution_id, o.original_command, o.stdout, o.stderr, o.exit_code, o.created_at
                  FROM outputs o
                  WHERE (
                    o.created_at < (SELECT created_at FROM outputs WHERE output_id = ?1)
@@ -276,11 +313,12 @@ impl Store {
             if let Some(row) = rows.next()? {
                 Ok(Some(StoredOutput {
                     output_id: row.get(0)?,
-                    original_command: row.get(1)?,
-                    stdout: row.get(2)?,
-                    stderr: row.get(3)?,
-                    exit_code: row.get(4)?,
-                    created_at: row.get(5)?,
+                    execution_id: row.get(1)?,
+                    original_command: row.get(2)?,
+                    stdout: row.get(3)?,
+                    stderr: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    created_at: row.get(6)?,
                 }))
             } else {
                 Ok(None)
@@ -292,22 +330,48 @@ impl Store {
     pub async fn latest_output(&self) -> anyhow::Result<Option<StoredOutput>> {
         self.run_db(|conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT output_id, original_command, stdout, stderr, exit_code, created_at
+                "SELECT output_id, execution_id, original_command, stdout, stderr, exit_code, created_at
                  FROM outputs ORDER BY created_at DESC, rowid DESC LIMIT 1",
             )?;
             let mut rows = stmt.query([])?;
             if let Some(row) = rows.next()? {
                 Ok(Some(StoredOutput {
                     output_id: row.get(0)?,
-                    original_command: row.get(1)?,
-                    stdout: row.get(2)?,
-                    stderr: row.get(3)?,
-                    exit_code: row.get(4)?,
-                    created_at: row.get(5)?,
+                    execution_id: row.get(1)?,
+                    original_command: row.get(2)?,
+                    stdout: row.get(3)?,
+                    stderr: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    created_at: row.get(6)?,
                 }))
             } else {
                 Ok(None)
             }
+        })
+        .await
+    }
+
+    /// Get recent outputs for resource listing.
+    pub async fn list_recent_outputs(&self, limit: i64) -> anyhow::Result<Vec<StoredOutput>> {
+        self.run_db(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT output_id, execution_id, original_command, stdout, stderr, exit_code, created_at
+                 FROM outputs ORDER BY created_at DESC LIMIT ?1",
+            )?;
+            let mut results = Vec::new();
+            let mut rows = stmt.query(params![limit])?;
+            while let Some(row) = rows.next()? {
+                results.push(StoredOutput {
+                    output_id: row.get(0)?,
+                    execution_id: row.get(1)?,
+                    original_command: row.get(2)?,
+                    stdout: row.get(3)?,
+                    stderr: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    created_at: row.get(6)?,
+                });
+            }
+            Ok(results)
         })
         .await
     }
@@ -378,12 +442,143 @@ impl Store {
         .await
     }
 
+    /// Update a pattern's fix outcome after the agent reports whether a fix worked.
+    /// Matches by `command_template` exact + `stderr_pattern` LIKE containment.
+    /// Uses a rolling average to update `fix_success_rate`:
+    /// new_rate = (old_rate * old_count + (1 if success else 0)) / (old_count + 1).
+    pub async fn update_fix_outcome(
+        &self,
+        command_template: &str,
+        stderr: &str,
+        fix_command: Option<&str>,
+        success: bool,
+    ) -> anyhow::Result<()> {
+        let command_template = command_template.to_string();
+        let stderr = stderr.to_string();
+        let fix_command = fix_command.map(|s| s.to_string());
+        self.run_db(move |conn| {
+            // Find the matching pattern using LIKE (same fuzzy logic as find_pattern)
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, fix_success_rate, usage_count
+                   FROM patterns
+                  WHERE command_template = ?1
+                    AND length(?2) > 0
+                    AND length(stderr_pattern) > 0
+                    AND ?2 LIKE '%' || stderr_pattern || '%'
+                  ORDER BY fix_success_rate DESC, usage_count DESC
+                  LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![command_template, stderr])?;
+            let (pattern_id, old_rate, old_count): (i64, f64, i64) =
+                if let Some(row) = rows.next()? {
+                    (row.get(0)?, row.get(1)?, row.get(2)?)
+                } else {
+                    anyhow::bail!(
+                        "No pattern found for command_template='{}' with matching stderr",
+                        command_template
+                    );
+                };
+
+            let score = if success { 1.0_f64 } else { 0.0_f64 };
+            // Rolling average: clamp to [0.0, 1.0]
+            let new_rate =
+                ((old_rate * old_count as f64 + score) / (old_count as f64 + 1.0)).clamp(0.0, 1.0);
+
+            conn.execute(
+                "UPDATE patterns
+                    SET fix_command = COALESCE(?1, fix_command),
+                        fix_success_rate = ?2,
+                        usage_count = usage_count + 1,
+                        last_used = ?3
+                  WHERE id = ?4",
+                params![fix_command, new_rate, Utc::now().to_rfc3339(), pattern_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Auto-detect when a successfully-executed command matches a known fix_command
+    /// from a previously failed pattern. Increments the fix success rate.
+    pub async fn auto_bump_fix_success(
+        &self,
+        command_template: &str,
+        fix_success: bool,
+    ) -> anyhow::Result<()> {
+        let command_template = command_template.to_string();
+        self.run_db(move |conn| {
+            let score = if fix_success { 1.0_f64 } else { 0.0_f64 };
+            conn.execute(
+                "UPDATE patterns
+                    SET fix_success_rate = CASE
+                            WHEN usage_count > 0
+                            THEN (fix_success_rate * usage_count + ?2) / (usage_count + 1)
+                            ELSE ?2
+                        END,
+                        usage_count = usage_count + 1,
+                        last_used = ?3
+                  WHERE fix_command IS NOT NULL
+                    AND fix_command = ?1",
+                params![command_template, score, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Count recovery attempts grouped by recovery code (for diagnostics).
     pub async fn recovery_attempt_counts(&self) -> anyhow::Result<Vec<(String, i64)>> {
         self.run_db(|conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT recovery_code, COUNT(*) as cnt
                  FROM recovery_attempts
+                 GROUP BY recovery_code
+                 ORDER BY cnt DESC",
+            )?;
+            let mut results = Vec::new();
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                results.push((row.get(0)?, row.get(1)?));
+            }
+            Ok(results)
+        })
+        .await
+    }
+
+    /// Count patterns that have a known fix command.
+    pub async fn patterns_with_fixes_count(&self) -> anyhow::Result<i64> {
+        self.run_db(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM patterns WHERE fix_command IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(count)
+        })
+        .await
+    }
+
+    /// Average fix success rate across patterns that have a fix command.
+    pub async fn average_fix_success_rate(&self) -> anyhow::Result<f64> {
+        self.run_db(|conn| {
+            let avg: f64 = conn.query_row(
+                "SELECT COALESCE(AVG(fix_success_rate), 0.0)
+                     FROM patterns
+                     WHERE fix_command IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(avg)
+        })
+        .await
+    }
+
+    /// Count patterns grouped by recovery code (for diagnostics).
+    pub async fn pattern_counts_by_code(&self) -> anyhow::Result<Vec<(String, i64)>> {
+        self.run_db(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT recovery_code, COUNT(*) as cnt
+                 FROM patterns
                  GROUP BY recovery_code
                  ORDER BY cnt DESC",
             )?;
@@ -479,6 +674,7 @@ impl Store {
 #[derive(Debug, Clone)]
 pub struct StoredOutput {
     pub output_id: String,
+    pub execution_id: Option<String>,
     pub original_command: String,
     pub stdout: String,
     pub stderr: String,
@@ -515,7 +711,7 @@ mod tests {
         let (store, _dir) = test_store();
         let id = store.next_output_id();
         store
-            .save_output(&id, "echo hello", "hello\n", "", 0)
+            .save_output(&id, "test-id", "echo hello", "hello\n", "", 0)
             .await
             .unwrap();
         let output = store.get_output(&id).await.unwrap().unwrap();
@@ -634,12 +830,12 @@ mod tests {
         let (store, _dir) = test_store();
         let id1 = store.next_output_id();
         store
-            .save_output(&id1, "first", "out1", "", 0)
+            .save_output(&id1, "test-1", "first", "out1", "", 0)
             .await
             .unwrap();
         let id2 = store.next_output_id();
         store
-            .save_output(&id2, "second", "out2", "", 0)
+            .save_output(&id2, "test-2", "second", "out2", "", 0)
             .await
             .unwrap();
         let latest = store.latest_output().await.unwrap().unwrap();
@@ -651,12 +847,12 @@ mod tests {
         let (store, _dir) = test_store();
         let id1 = store.next_output_id();
         store
-            .save_output(&id1, "first", "out1", "", 0)
+            .save_output(&id1, "test-1", "first", "out1", "", 0)
             .await
             .unwrap();
         let id2 = store.next_output_id();
         store
-            .save_output(&id2, "second", "out2", "", 0)
+            .save_output(&id2, "test-2", "second", "out2", "", 0)
             .await
             .unwrap();
         let prev = store.previous_output(&id2).await.unwrap().unwrap();

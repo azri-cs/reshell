@@ -22,8 +22,6 @@ pub fn suggest(
             reason: "Syntax error detected. Review flags and usage.".to_string(),
         },
         RecoveryCode::R21 => {
-            // Only suggest sudo for the command itself, not the full command string,
-            // to avoid injecting shell metacharacters into a privileged context.
             let safe_cmd = if contains_shell_operators(original_command) {
                 first_word(original_command).to_string()
             } else {
@@ -38,6 +36,21 @@ pub fn suggest(
         }
         RecoveryCode::R22 => {
             let cmd = first_word(original_command);
+            // Try suggesting an alternative first, then fall back to install
+            if let Some(alt_suggestion) = super::alternatives::suggest_alternative(cmd, detector) {
+                let alt_cmd = alt_suggestion
+                    .split("Try: ")
+                    .nth(1)
+                    .unwrap_or(&alt_suggestion)
+                    .trim()
+                    .to_string();
+                return Suggestion {
+                    action: "use_alternative".to_string(),
+                    command: Some(alt_cmd),
+                    confidence: "medium".to_string(),
+                    reason: alt_suggestion,
+                };
+            }
             let install_cmd = detector.suggest_install_command(cmd);
             Suggestion {
                 action: "install_missing_tool".to_string(),
@@ -58,19 +71,56 @@ pub fn suggest(
             reason: "Command timed out. Consider increasing timeout or running in smaller chunks."
                 .to_string(),
         },
-        RecoveryCode::R24 => Suggestion {
-            action: "run_diagnostic".to_string(),
-            command: diagnostic_for_tool(original_command),
-            confidence: "medium".to_string(),
-            reason: "Subcommand failed. Run a diagnostic to investigate root cause.".to_string(),
-        },
-        RecoveryCode::R25 => Suggestion {
-            action: "use_posix".to_string(),
-            command: None,
-            confidence: "medium".to_string(),
-            reason: "Environment mismatch detected. Use POSIX-compliant or shell-native syntax."
-                .to_string(),
-        },
+        RecoveryCode::R24 => {
+            // Try extracting missing dependency from stderr
+            if let Some(dep_suggestion) =
+                super::deps::suggest_missing_dep(original_command, _context, detector)
+            {
+                return Suggestion {
+                    action: "install_missing_dep".to_string(),
+                    command: dep_suggestion
+                        .split(": `")
+                        .nth(1)
+                        .and_then(|s| s.split('`').next())
+                        .map(|s| s.to_string()),
+                    confidence: "medium".to_string(),
+                    reason: dep_suggestion,
+                };
+            }
+            Suggestion {
+                action: "run_diagnostic".to_string(),
+                command: diagnostic_for_tool(original_command),
+                confidence: "medium".to_string(),
+                reason: "Subcommand failed. Run a diagnostic to investigate root cause."
+                    .to_string(),
+            }
+        }
+        RecoveryCode::R25 => {
+            // Try translating bashisms for the detected shell
+            let shell = detector.shell.as_str();
+            if let Some(translation) = super::bashisms::translate_bashisms(original_command, shell)
+            {
+                let fixed = translation
+                    .lines()
+                    .last()
+                    .and_then(|l| l.strip_prefix("Suggested rewrite: "))
+                    .unwrap_or(original_command);
+                return Suggestion {
+                    action: "rewrite_bashism".to_string(),
+                    command: Some(fixed.to_string()),
+                    confidence: "medium".to_string(),
+                    reason: translation,
+                };
+            }
+            Suggestion {
+                action: "use_posix".to_string(),
+                command: None,
+                confidence: "medium".to_string(),
+                reason:
+                    "Environment mismatch detected. Use POSIX-compliant or shell-native syntax."
+                        .to_string(),
+            }
+        }
         RecoveryCode::R26 => Suggestion {
             action: "scope_output".to_string(),
             command: Some(format!("{} | head -n 50", original_command)),
@@ -180,15 +230,46 @@ mod tests {
     fn r22_suggests_install() {
         let mut detector = default_detector();
         detector.package_manager = Some("apt".to_string());
-        let s = suggest(RecoveryCode::R22, "gh pr view", "", &detector);
+        // "nonexistent_tool_xyz" has no registered alternative, so it falls through to install
+        let s = suggest(
+            RecoveryCode::R22,
+            "nonexistent_tool_xyz arg1",
+            "",
+            &detector,
+        );
         assert_eq!(s.action, "install_missing_tool");
-        assert!(s.command.as_deref().unwrap().contains("gh"));
+        assert!(s
+            .command
+            .as_deref()
+            .unwrap()
+            .contains("nonexistent_tool_xyz"));
         assert_eq!(s.confidence, "high");
     }
 
     #[test]
+    fn r22_suggests_alternative_when_available() {
+        let mut detector = default_detector();
+        detector.package_manager = Some("apt".to_string());
+        detector
+            .available_tools
+            .push(crate::env::detector::ToolInfo {
+                name: "hub".to_string(),
+                version: None,
+            });
+        let s = suggest(RecoveryCode::R22, "gh pr view", "", &detector);
+        assert_eq!(s.action, "use_alternative");
+        assert!(s.reason.contains("hub"));
+    }
+
+    #[test]
     fn r22_no_package_manager() {
-        let s = suggest(RecoveryCode::R22, "gh pr view", "", &default_detector());
+        // Use a command without registered alternatives so it falls to install
+        let s = suggest(
+            RecoveryCode::R22,
+            "nonexistent_tool_xyz",
+            "",
+            &default_detector(),
+        );
         assert_eq!(s.action, "install_missing_tool");
         assert!(s.command.is_none());
         assert_eq!(s.confidence, "medium");
@@ -235,7 +316,8 @@ mod tests {
 
     #[test]
     fn r25_suggests_posix() {
-        let s = suggest(RecoveryCode::R25, "echo ${!var}", "", &default_detector());
+        // Use a command without bashisms so it falls to generic POSIX suggestion
+        let s = suggest(RecoveryCode::R25, "echo $VAR", "", &default_detector());
         assert_eq!(s.action, "use_posix");
         assert!(s.command.is_none());
         assert_eq!(s.confidence, "medium");

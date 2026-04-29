@@ -37,11 +37,37 @@ pub fn render_view(
     previous: Option<&str>,
     source_output_id: Option<String>,
 ) -> ViewedCompactResult {
+    render_view_with_filename(output, view, previous, source_output_id, None)
+}
+
+/// Render a view with optional filename hint for language-aware compaction.
+pub fn render_view_with_filename(
+    output: &str,
+    view: CompactView,
+    previous: Option<&str>,
+    source_output_id: Option<String>,
+    filename: Option<&str>,
+) -> ViewedCompactResult {
     let content = match view {
-        CompactView::Full => output.to_string(),
+        CompactView::Full => {
+            // Auto-compact JSON/XML even in full view
+            if super::json::looks_like_json(output) {
+                format!(
+                    "JSON detected (auto-compacted):\n{}",
+                    super::json::compact_json(output)
+                )
+            } else if super::json::looks_like_xml(output) {
+                format!(
+                    "XML detected (auto-compacted):\n{}",
+                    super::json::compact_xml(output)
+                )
+            } else {
+                output.to_string()
+            }
+        }
         CompactView::Skeleton => {
             let compacted = super::compact(output, None);
-            skeleton_or_content(&compacted)
+            skeleton_or_content(&compacted, filename)
         }
         CompactView::Diff => {
             if let Some(previous_output) = previous {
@@ -87,8 +113,11 @@ pub fn render_view(
     }
 }
 
-fn skeleton_or_content(compacted: &CompactResult) -> String {
-    if !compacted.skeleton.is_empty() {
+fn skeleton_or_content(compacted: &CompactResult, filename: Option<&str>) -> String {
+    let lang_skeleton = super::skeleton::extract_skeleton_with_lang(&compacted.content, filename);
+    if !lang_skeleton.is_empty() {
+        lang_skeleton
+    } else if !compacted.skeleton.is_empty() {
         compacted.skeleton.clone()
     } else {
         compacted.content.clone()

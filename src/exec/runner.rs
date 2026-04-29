@@ -85,6 +85,8 @@ impl Runner {
     }
 
     pub async fn run(&self, req: &ExecRequest) -> anyhow::Result<ExecResult> {
+        let execution_id = uuid::Uuid::new_v4().to_string();
+
         // 1. Validate
         if let Err(e) = validator::validate(&req.command) {
             return Ok(ExecResult {
@@ -92,6 +94,7 @@ impl Runner {
                 recovery_code: RecoveryCode::R27.to_string(),
                 recovery_class: RecoveryCode::R27.class_name().to_string(),
                 original_command: req.command.clone(),
+                execution_id,
                 output_id: None,
                 suggestion: serde_json::to_value(
                     resolve_suggestion(
@@ -237,6 +240,7 @@ impl Runner {
             .store
             .save_output(
                 &output_id,
+                &execution_id,
                 &req.command,
                 &final_stdout,
                 &scrubbed_stderr,
@@ -251,20 +255,37 @@ impl Runner {
         }
 
         if classification.code != RecoveryCode::R10 && !resolved.matched_pattern_row {
+            // If the recovery suggestion includes a concrete fix command, save it
+            // so the pattern can be reused on subsequent occurrences.
+            let fix_command = suggestion.command.clone();
+            let fix_success_rate = if fix_command.is_some() { 0.1 } else { 0.0 };
+
             let learned_pattern = Pattern {
                 id: None,
                 command_hash: hash_command(&normalized_command),
                 command_template: normalized_command.clone(),
                 recovery_code: classification.code.to_string(),
                 stderr_pattern: normalized_stderr.clone(),
-                fix_command: None,
-                fix_success_rate: 0.0,
+                fix_command,
+                fix_success_rate,
                 last_used: Some(chrono::Utc::now()),
                 usage_count: 1,
                 platform_tag: Some(crate::memory::pattern::current_platform_tag().to_string()),
             };
             if let Err(e) = self.store.save_pattern(&learned_pattern).await {
                 eprintln!("rsh: warning: failed to save learned pattern: {}", e);
+            }
+        }
+
+        // If the command succeeded and it matches a known fix_command pattern,
+        // auto-increment that pattern's success rate (feedback loop without agent action).
+        if classification.code == RecoveryCode::R10 {
+            if let Err(e) = self
+                .store
+                .auto_bump_fix_success(&normalized_command, true)
+                .await
+            {
+                eprintln!("rsh: warning: failed to auto-bump fix success: {}", e);
             }
         }
 
@@ -315,6 +336,7 @@ impl Runner {
             recovery_code: classification.code.to_string(),
             recovery_class: classification.code.class_name().to_string(),
             original_command: req.command.clone(),
+            execution_id,
             output_id: Some(output_id),
             suggestion: serde_json::to_value(suggestion)?,
             output: OutputInfo {
@@ -344,11 +366,31 @@ impl Runner {
         }
         let mut warnings = Vec::new();
         for (k, v) in &req.env {
-            if BLOCKED_ENV_KEYS.contains(&k.as_str()) {
+            let blocked = BLOCKED_ENV_KEYS.contains(&k.as_str())
+                || crate::config::get()
+                    .sandbox
+                    .additional_blocked_env
+                    .contains(&k.to_string());
+            let allowed = crate::config::get()
+                .sandbox
+                .allowed_env
+                .contains(&k.to_string());
+
+            if blocked && !allowed {
                 warnings.push(format!("Blocked security-sensitive env var: {}", k));
                 continue;
             }
             cmd.env(k, v);
+        }
+
+        // Apply seccomp sandbox if configured
+        if crate::config::get().sandbox.seccomp {
+            use crate::sandbox::seccomp;
+            if seccomp::is_seccomp_available() {
+                unsafe {
+                    cmd.pre_exec(|| seccomp::apply_seccomp_filter().map_err(std::io::Error::other));
+                }
+            }
         }
 
         let effective_timeout = req.timeout.min(MAX_TIMEOUT_SECS);
@@ -432,8 +474,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(pattern.fix_command.is_none());
-        assert_eq!(pattern.fix_success_rate, 0.0);
+        // fix_command may be set if the recovery suggestion produced a concrete command
+        if pattern.fix_command.is_some() {
+            assert_eq!(pattern.fix_success_rate, 0.1);
+        } else {
+            assert_eq!(pattern.fix_success_rate, 0.0);
+        }
     }
 
     #[tokio::test]

@@ -12,17 +12,6 @@ use crate::sandbox::paths;
 
 use super::server::ServerState;
 
-#[derive(Debug, serde::Serialize)]
-pub struct ToolResponse {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-    #[serde(skip)]
-    pub is_error: bool,
-}
-
 pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
@@ -50,16 +39,16 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "rsh_recover",
-            "description": "Get a deterministic recovery strategy for a known failure. CALL THIS when rsh_exec returns status='failed' with a recovery_code other than R10. Pass the recovery_code and original_command from the rsh_exec response (or use the next_action field which provides ready-to-use parameters).",
+            "description": "Get a deterministic recovery strategy for a known failure. CALL THIS when rsh_exec returns status='failed' with a recovery_code other than R10. You can either pass the execution_id from the failed rsh_exec response (simplest), or pass recovery_code and original_command explicitly.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "recovery_code": { "type": "string", "description": "Recovery code from rsh_exec response (R20-R30)" },
-                    "original_command": { "type": "string", "description": "The command that failed (from rsh_exec original_command)" },
+                    "execution_id": { "type": "string", "description": "The execution_id from the failed rsh_exec response. If provided, all other context is resolved automatically." },
+                    "recovery_code": { "type": "string", "description": "Recovery code from rsh_exec response (R20-R30). Required if execution_id is not provided." },
+                    "original_command": { "type": "string", "description": "The command that failed (from rsh_exec original_command). Required if execution_id is not provided." },
                     "context": { "type": "string", "description": "Optional additional context about the failure" },
                     "stderr": { "type": "string", "description": "Normalized stderr from rsh_exec (pass next_action.stderr when present) for learned-pattern lookup" }
-                },
-                "required": ["recovery_code", "original_command"]
+                }
             }
         }),
         json!({
@@ -82,25 +71,47 @@ pub fn list_tools() -> Vec<Value> {
                 "properties": {}
             }
         }),
+        json!({
+            "name": "rsh_feedback",
+            "description": "Report whether a recovery fix succeeded or failed. CALL THIS after you retry a failed command using a fix suggested by rsh_recover. This updates the pattern memory so future occurrences get higher-confidence suggestions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "original_command": { "type": "string", "description": "The command that originally failed (from the rsh_exec response's original_command field)" },
+                    "stderr": { "type": "string", "description": "The stderr from the original failure (from rsh_exec output.stderr or next_action.params.stderr)" },
+                    "fix_command": { "type": "string", "description": "The command you actually ran that fixed the issue" },
+                    "success": { "type": "boolean", "description": "Whether the fix resolved the failure" }
+                },
+                "required": ["original_command", "fix_command", "success"]
+            }
+        }),
+        json!({
+            "name": "rsh_stats",
+            "description": "Get statistics about rsh pattern memory: recovery attempt counts, top fixing patterns, and command failure rates. Use for diagnostics and understanding learning effectiveness.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
     ]
 }
 
+/// Handle a tool call. Returns `(data_value, is_error)` where `data_value` is the
+/// tool-specific result payload (NOT wrapped in a ToolResponse envelope).
 pub(crate) async fn handle_tool_call(
     name: &str,
     arguments: Value,
     state: &Arc<Mutex<ServerState>>,
-) -> ToolResponse {
+) -> (Value, bool) {
     match name {
         "rsh_exec" => {
             let wrapper = match serde_json::from_value::<ExecRequestWrapper>(arguments) {
                 Ok(w) => w,
                 Err(e) => {
-                    return ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("Invalid arguments: {}", e)),
-                        data: None,
-                        is_error: true,
-                    }
+                    return (
+                        json!({ "error": format!("Invalid arguments: {}", e) }),
+                        true,
+                    );
                 }
             };
             let req = ExecRequest {
@@ -116,28 +127,16 @@ pub(crate) async fn handle_tool_call(
             };
             let runner = Runner::with_store(store);
             match runner.run(&req).await {
-                Ok(result) => ToolResponse {
-                    status: result.status.clone(),
-                    error: None,
-                    data: Some(json!(result)),
-                    is_error: result.status == "failed",
-                },
-                Err(e) => ToolResponse {
-                    status: "error".to_string(),
-                    error: Some(e.to_string()),
-                    data: None,
-                    is_error: true,
-                },
+                Ok(result) => {
+                    let is_error = result.status == "failed";
+                    (json!(result), is_error)
+                }
+                Err(e) => (json!({ "error": e.to_string() }), true),
             }
         }
         "rsh_env" => {
             let detector = Detector::cached().await.clone();
-            ToolResponse {
-                status: "success".to_string(),
-                error: None,
-                data: Some(json!(detector)),
-                is_error: false,
-            }
+            (json!(detector), false)
         }
         "rsh_check" => {
             let detector = Detector::cached().await.clone();
@@ -150,6 +149,15 @@ pub(crate) async fn handle_tool_call(
                 Err(e) => (0, format!("degraded: {}", e)),
             };
             let healthy = store_status == "ok";
+
+            // Gather pattern stats
+            let (fixes_count, avg_success_rate) = if healthy {
+                let fixes = store.patterns_with_fixes_count().await.unwrap_or(0);
+                let avg = store.average_fix_success_rate().await.unwrap_or(0.0);
+                (fixes, avg)
+            } else {
+                (0, 0.0)
+            };
 
             let guidance = json!({
                 "status": if healthy { "healthy" } else { "degraded" },
@@ -166,7 +174,8 @@ pub(crate) async fn handle_tool_call(
                         "rsh_recover": "Call when rsh_exec returns status='failed'. Pass recovery_code and original_command from the response.",
                         "rsh_compact": "Call when rsh_exec returns truncated=true. Use the output_id from the response with view='skeleton' for structural summary.",
                         "rsh_env": "Detect OS, shell, available dev tools, and package manager. Call at session start.",
-                        "rsh_check": "This tool — verify reshell is working and get usage guidance."
+                        "rsh_check": "This tool — verify reshell is working and get usage guidance.",
+                        "rsh_feedback": "Call after a recovery fix succeeds or fails. Pass original_command, fix_command, and success to improve pattern memory."
                     },
                     "recovery_codes": {
                         "R10": "Success — no action needed.",
@@ -181,60 +190,95 @@ pub(crate) async fn handle_tool_call(
                         "R30": "Fatal/Unknown — requires human escalation."
                     }
                 },
-                "learned_patterns": pattern_count,
+                "learned_patterns": {
+                    "total": pattern_count,
+                    "with_fixes": fixes_count,
+                    "average_fix_success_rate": avg_success_rate
+                },
             });
-            ToolResponse {
-                status: if healthy {
-                    "success".to_string()
-                } else {
-                    "degraded".to_string()
-                },
-                error: if healthy {
-                    None
-                } else {
-                    Some("Pattern store unavailable; rsh_exec may not persist outputs.".to_string())
-                },
-                data: Some(guidance),
-                is_error: !healthy,
-            }
+            (guidance, !healthy)
         }
         "rsh_recover" => {
             let req = match serde_json::from_value::<RecoverRequest>(arguments) {
                 Ok(r) => r,
                 Err(e) => {
-                    return ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("Invalid arguments: {}", e)),
-                        data: None,
-                        is_error: true,
-                    }
+                    return (
+                        json!({ "error": format!("Invalid arguments: {}", e) }),
+                        true,
+                    );
                 }
             };
-            let code = parse_recovery_code(&req.recovery_code);
-            let detector = Detector::cached().await.clone();
-            let context = req.context.unwrap_or_default();
+
             let store = {
                 let s = state.lock().await;
                 s.store.clone()
             };
+
+            // Resolve from execution_id if provided
+            let (recovery_code, original_command, context, stderr) =
+                if let Some(ref exec_id) = req.execution_id {
+                    match store.get_output_by_execution_id(exec_id).await {
+                        Ok(Some(output)) => {
+                            let stderr = output.stderr;
+                            // For recovery_code, we don't store it in outputs table.
+                            // Fall back to explicit params or re-classify from exit_code and stderr.
+                            let code = req
+                                .recovery_code
+                                .clone()
+                                .unwrap_or_else(|| "R30".to_string());
+                            let command = req
+                                .original_command
+                                .clone()
+                                .unwrap_or(output.original_command);
+                            let ctx = req
+                                .context
+                                .clone()
+                                .unwrap_or_else(|| format!("execution_id={}", exec_id));
+                            (code, command, ctx, Some(stderr))
+                        }
+                        Ok(None) => {
+                            return (
+                                json!({ "error": format!("Unknown execution_id: {}", exec_id) }),
+                                true,
+                            );
+                        }
+                        Err(e) => {
+                            return (
+                                json!({ "error": format!("Failed to lookup execution_id: {}", e) }),
+                                true,
+                            );
+                        }
+                    }
+                } else {
+                    // Traditional explicit params
+                    let code = req
+                        .recovery_code
+                        .clone()
+                        .unwrap_or_else(|| "R30".to_string());
+                    let command = req
+                        .original_command
+                        .clone()
+                        .unwrap_or_else(|| "".to_string());
+                    let ctx = req.context.clone().unwrap_or_default();
+                    (code, command, ctx, req.stderr.clone())
+                };
+
+            let code = parse_recovery_code(&recovery_code);
+            let detector = Detector::cached().await.clone();
+
             let resolved = match resolve_suggestion(
                 &store,
                 code,
-                &req.original_command,
+                &original_command,
                 &context,
-                req.stderr.as_deref(),
+                stderr.as_deref(),
                 &detector,
             )
             .await
             {
                 Ok(r) => r,
                 Err(e) => {
-                    return ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("Recovery failed: {}", e)),
-                        data: None,
-                        is_error: true,
-                    };
+                    return (json!({ "error": format!("Recovery failed: {}", e) }), true);
                 }
             };
             let suggestion = resolved.suggestion;
@@ -244,31 +288,20 @@ pub(crate) async fn handle_tool_call(
                 let s = state.lock().await;
                 let _ = s
                     .store
-                    .log_recovery_attempt(
-                        &req.recovery_code,
-                        &req.original_command,
-                        &suggestion.action,
-                    )
+                    .log_recovery_attempt(&recovery_code, &original_command, &suggestion.action)
                     .await;
             }
 
-            ToolResponse {
-                status: "success".to_string(),
-                error: None,
-                data: Some(json!(suggestion)),
-                is_error: false,
-            }
+            (json!(suggestion), false)
         }
         "rsh_compact" => {
             let req = match serde_json::from_value::<CompactRequest>(arguments) {
                 Ok(r) => r,
                 Err(e) => {
-                    return ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("Invalid arguments: {}", e)),
-                        data: None,
-                        is_error: true,
-                    }
+                    return (
+                        json!({ "error": format!("Invalid arguments: {}", e) }),
+                        true,
+                    );
                 }
             };
             let store = {
@@ -277,23 +310,15 @@ pub(crate) async fn handle_tool_call(
             };
             let view = CompactView::parse(req.view.as_deref().unwrap_or("skeleton"));
             if let Some(file_path) = req.file {
-                // Validate path and read file atomically to prevent TOCTOU races
                 match paths::validate_and_read_file(&file_path) {
                     Ok((_path, content)) => {
                         let compacted = render_view(&content, view, None, None);
-                        ToolResponse {
-                            status: "success".to_string(),
-                            error: None,
-                            data: Some(json!(compacted)),
-                            is_error: false,
-                        }
+                        (json!(compacted), false)
                     }
-                    Err(e) => ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("File access failed: {}", e)),
-                        data: None,
-                        is_error: true,
-                    },
+                    Err(e) => (
+                        json!({ "error": format!("File access failed: {}", e) }),
+                        true,
+                    ),
                 }
             } else if let Some(output_id) = req.output_id {
                 match store.get_output(&output_id).await {
@@ -314,41 +339,97 @@ pub(crate) async fn handle_tool_call(
                             previous.as_deref(),
                             Some(output.output_id),
                         );
-                        ToolResponse {
-                            status: "success".to_string(),
-                            error: None,
-                            data: Some(json!(compacted)),
-                            is_error: false,
-                        }
+                        (json!(compacted), false)
                     }
-                    Ok(None) => ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("Unknown output_id: {}", output_id)),
-                        data: None,
-                        is_error: true,
-                    },
-                    Err(e) => ToolResponse {
-                        status: "error".to_string(),
-                        error: Some(format!("Failed to fetch output: {}", e)),
-                        data: None,
-                        is_error: true,
-                    },
+                    Ok(None) => (
+                        json!({ "error": format!("Unknown output_id: {}", output_id) }),
+                        true,
+                    ),
+                    Err(e) => (
+                        json!({ "error": format!("Failed to fetch output: {}", e) }),
+                        true,
+                    ),
                 }
             } else {
-                ToolResponse {
-                    status: "error".to_string(),
-                    error: Some("No file or output_id provided for compact".to_string()),
-                    data: None,
-                    is_error: true,
-                }
+                (
+                    json!({ "error": "No file or output_id provided for compact" }),
+                    true,
+                )
             }
         }
-        _ => ToolResponse {
-            status: "error".to_string(),
-            error: Some(format!("Unknown tool: {}", name)),
-            data: None,
-            is_error: true,
-        },
+        "rsh_feedback" => {
+            let req = match serde_json::from_value::<FeedbackRequest>(arguments) {
+                Ok(r) => r,
+                Err(e) => {
+                    return (
+                        json!({ "error": format!("Invalid arguments: {}", e) }),
+                        true,
+                    );
+                }
+            };
+            let store = {
+                let s = state.lock().await;
+                s.store.clone()
+            };
+
+            let command_template = crate::utils::normalize_command(&req.original_command);
+            let stderr_for_lookup = req
+                .stderr
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| {
+                    crate::utils::truncate_utf8(
+                        s,
+                        super::super::recover::resolve::STDERR_PATTERN_MAX_BYTES,
+                    )
+                })
+                .unwrap_or_default();
+
+            match store
+                .update_fix_outcome(
+                    &command_template,
+                    &stderr_for_lookup,
+                    Some(&req.fix_command),
+                    req.success,
+                )
+                .await
+            {
+                Ok(()) => (
+                    json!({ "status": "recorded", "success": req.success, "fix_command": req.fix_command }),
+                    false,
+                ),
+                Err(e) => (
+                    json!({ "error": format!("Failed to record feedback: {}", e) }),
+                    true,
+                ),
+            }
+        }
+        "rsh_stats" => {
+            let store = {
+                let s = state.lock().await;
+                s.store.clone()
+            };
+            let recovery_counts = store.recovery_attempt_counts().await.unwrap_or_default();
+            let pattern_fixes = store.patterns_with_fixes_count().await.unwrap_or(0);
+            let avg_success = store.average_fix_success_rate().await.unwrap_or(0.0);
+            let by_code = store.pattern_counts_by_code().await.unwrap_or_default();
+            let total_patterns = store.pattern_count().await.unwrap_or(0);
+
+            let stats = json!({
+                "patterns": {
+                    "total": total_patterns,
+                    "with_fixes": pattern_fixes,
+                    "average_fix_success_rate": avg_success,
+                    "by_recovery_code": by_code
+                },
+                "recovery_attempts": {
+                    "total": recovery_counts.iter().map(|(_, c)| c).sum::<i64>(),
+                    "by_code": recovery_counts
+                }
+            });
+            (stats, false)
+        }
+        _ => (json!({ "error": format!("Unknown tool: {}", name) }), true),
     }
 }
 
@@ -378,8 +459,13 @@ struct ExecRequestWrapper {
 
 #[derive(Debug, serde::Deserialize)]
 struct RecoverRequest {
-    recovery_code: String,
-    original_command: String,
+    #[serde(default)]
+    execution_id: Option<String>,
+    #[serde(default)]
+    recovery_code: Option<String>,
+    #[serde(default)]
+    original_command: Option<String>,
+    #[serde(default)]
     context: Option<String>,
     #[serde(default)]
     stderr: Option<String>,
@@ -392,4 +478,13 @@ struct CompactRequest {
     file: Option<String>,
     #[serde(rename = "view")]
     view: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FeedbackRequest {
+    original_command: String,
+    #[serde(default)]
+    stderr: Option<String>,
+    fix_command: String,
+    success: bool,
 }

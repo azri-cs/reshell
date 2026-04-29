@@ -1,6 +1,7 @@
 pub mod classify;
 pub mod cli;
 pub mod compact;
+pub mod config;
 pub mod env;
 pub mod exec;
 pub mod mcp;

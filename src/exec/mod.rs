@@ -20,6 +20,8 @@ pub struct ExecResult {
     pub recovery_code: String,
     pub recovery_class: String,
     pub original_command: String,
+    /// Unique ID for this execution, for linking to recovery and feedback flows.
+    pub execution_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_id: Option<String>,
     pub suggestion: serde_json::Value,

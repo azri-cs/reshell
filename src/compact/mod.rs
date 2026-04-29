@@ -1,12 +1,18 @@
 pub mod diff;
+pub mod json;
+pub mod languages;
 pub mod skeleton;
 pub mod view;
 
 use crate::utils::is_binary;
 use serde::{Deserialize, Serialize};
 
-const MAX_OUTPUT_LINES: usize = 100;
-const TAIL_LINES: usize = 20;
+fn max_output_lines() -> usize {
+    crate::config::get().compaction.max_output_lines
+}
+fn tail_lines() -> usize {
+    crate::config::get().compaction.tail_lines
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactResult {
@@ -45,7 +51,7 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
     let mut line_count: usize = 0;
     let mut head: Vec<&str> = Vec::with_capacity(50);
     let mut tail_ring: std::collections::VecDeque<&str> =
-        std::collections::VecDeque::with_capacity(TAIL_LINES);
+        std::collections::VecDeque::with_capacity(tail_lines());
     let mut skeleton_lines: Vec<String> = Vec::new();
 
     for line in output.lines() {
@@ -53,7 +59,7 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
         if head.len() < 50 {
             head.push(line);
         }
-        if tail_ring.len() == TAIL_LINES {
+        if tail_ring.len() == tail_lines() {
             tail_ring.pop_front();
         }
         tail_ring.push_back(line);
@@ -62,7 +68,7 @@ pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
         }
     }
 
-    if line_count <= MAX_OUTPUT_LINES {
+    if line_count <= max_output_lines() {
         return CompactResult {
             compacted: false,
             content: output.to_string(),

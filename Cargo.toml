@@ -36,6 +36,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 toml = "0.8"
 
+# Linux-only seccomp sandbox
+[target.'cfg(target_os = "linux")'.dependencies]
+libseccomp = { version = "0.3", optional = true }
+
+[features]
+default = []
+seccomp = ["libseccomp"]
+
 [dev-dependencies]
 tokio-test = "0.4"
 insta = { version = "1", features = ["json"] }
