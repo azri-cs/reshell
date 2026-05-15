@@ -16,15 +16,13 @@ pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "rsh_exec",
-            "description": "Execute a shell command with automatic failure classification, secret scrubbing, and recovery suggestions. USE THIS INSTEAD of raw bash/shell for ALL commands that install packages, run builds, modify files, or could fail with cryptic errors. On failure, check the auto_retry field first (high-confidence R22 fixes are auto-applied). Then check next_action for the recovery tool to call. When output is truncated (truncated=true), use rsh_compact with the returned output_id. Anti-pattern: using raw bash alongside rsh_exec — pick one and use it consistently.",
+            "description": "Execute ANY shell command. USE THIS INSTEAD OF RAW BASH for every command. Secrets are auto-redacted. On failure, high-confidence fixes (missing tools) are auto-applied (check auto_retry field). Failures return a concrete fix command in suggestion.command. Successes are compacted. Call rsh_feedback after trying a fix to build pattern memory.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The shell command to execute" },
-                    "cwd": { "type": "string", "description": "Working directory" },
-                    "timeout": { "type": "integer", "default": 120, "description": "Maximum execution time in seconds (capped at 600)" },
-                    "env": { "type": "object", "additionalProperties": { "type": "string" } },
-                    "retry": { "type": "boolean", "default": true, "description": "Automatically retry with a fallback shell on environment mismatch (R25)" }
+                    "command": { "type": "string", "description": "Shell command to execute (required)" },
+                    "cwd": { "type": "string", "description": "Working directory (default: current directory)" },
+                    "timeout": { "type": "integer", "default": 120, "description": "Timeout in seconds (max 600)" }
                 },
                 "required": ["command"]
             }

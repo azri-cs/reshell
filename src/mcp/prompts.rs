@@ -24,21 +24,30 @@ pub fn list_prompts() -> Vec<serde_json::Value> {
 pub fn get_prompt(name: &str, _arguments: Option<&serde_json::Value>) -> Option<String> {
     match name {
         "recovery_analysis" => Some(
-            "You are analyzing a command failure. Follow these steps:\n\
-             1. Identify the failure class from the recovery_code.\n\
-             2. Check if rsh has a learned fix for this failure pattern (from rsh_recover).\n\
-             3. Apply the suggested fix or reason about the root cause.\n\
-             4. Re-execute with the fixed command via rsh_exec.\n\
-             5. If successful, call rsh_feedback to improve pattern memory."
+            "You are analyzing a command failure.\n\n\
+             Steps:\n\
+             1. Check the `auto_retry` field first — if present and status=success,\n\
+                the fix was already auto-applied. Just call rsh_feedback.\n\
+             2. If auto_retry was absent or failed, call `rsh_recover` with the\n\
+                recovery_code and original_command from the failure.\n\
+             3. `rsh_recover` returns a fix command — pass it to `rsh_exec`.\n\
+             4. After retrying, **call `rsh_feedback` immediately** with the outcome.\n\
+                Without feedback, pattern memory cannot learn and this failure\n\
+                will not self-heal on future occurrences."
                 .to_string(),
         ),
         "environment_audit" => Some(
-            "Review the detected shell environment. Consider:\n\
-             1. Is the right shell being used? (rsh auto-detects)\n\
-             2. Are essential dev tools available? (git, cargo, npm, etc.)\n\
-             3. Is a package manager detected? (apt, brew, etc.)\n\
-             4. Any known environment issues? (WSL paths, missing dependencies)\n\
-             5. Use rsh_env for full environment details."
+            "Audit the shell environment before running commands.\n\n\
+             Actions:\n\
+             1. Call `rsh_env` to detect the current environment (OS, shell, tools).\n\
+             2. Check that essential tools are available:\n\
+                - Is `git` available? → version detected\n\
+                - Is the project's language toolchain available? (cargo, node, npm, python3, go, etc.)\n\
+                - Is a package manager detected? (brew on macOS, apt on Debian, etc.)\n\
+             3. If a critical tool is missing, install it and call `rsh_env refresh=true`.\n\
+             4. Note the shell type — rsh auto-retries with the detected recovery\n\
+                shell on environment mismatch (R25).\n\
+             5. Use the package manager to suggest install commands for missing tools."
                 .to_string(),
         ),
         _ => None,
