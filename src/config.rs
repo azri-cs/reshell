@@ -5,6 +5,23 @@
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global flag to suppress stderr warnings (set in MCP mode so warnings
+/// don't interleave with JSON-RPC frames on stderr).
+static SUPPRESS_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// Suppress eprintln! warnings — call once during MCP server startup.
+pub fn suppress_stderr_warnings() {
+    SUPPRESS_STDERR.store(true, Ordering::Relaxed);
+}
+
+/// Emit a warning to stderr unless suppressed (MCP mode).
+pub(crate) fn warn(msg: &str) {
+    if !SUPPRESS_STDERR.load(Ordering::Relaxed) {
+        eprintln!("rsh: warning: {}", msg);
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ReshellConfig {
@@ -110,11 +127,26 @@ impl Default for ScrubberConfig {
     }
 }
 
+impl ReshellConfig {
+    /// Returns a config with defaults suitable for testing (smaller thresholds).
+    pub fn test_defaults() -> Self {
+        Self {
+            compaction: CompactionConfig {
+                max_output_lines: 10,
+                tail_lines: 5,
+                large_stdout_bytes: 1024, // small for fast tests
+                max_stored_output_rows: 100,
+            },
+            ..Default::default()
+        }
+    }
+}
+
 /// Singleton config, loaded on first use.
 static CONFIG: Lazy<ReshellConfig> = Lazy::new(|| match load_config() {
     Ok(cfg) => cfg,
     Err(e) => {
-        eprintln!("rsh: warning: failed to load config: {}; using defaults", e);
+        warn(&format!("failed to load config: {}; using defaults", e));
         ReshellConfig::default()
     }
 });

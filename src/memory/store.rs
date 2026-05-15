@@ -658,10 +658,10 @@ impl Store {
     fn set_restrictive_permissions(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            eprintln!(
-                "Warning: failed to set restrictive permissions on database: {}",
+            crate::config::warn(&format!(
+                "failed to set restrictive permissions on database: {}",
                 e
-            );
+            ));
         }
     }
 

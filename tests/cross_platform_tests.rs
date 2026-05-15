@@ -185,7 +185,7 @@ fn test_cross_shell_classification_matches_expected_codes() {
     for (i, case) in cases.iter().enumerate() {
         let normalized = normalize_stderr(case.raw);
         let timed_out = case.exit_code == 124;
-        let result = classify(case.exit_code, &normalized, "", timed_out, "");
+        let result = classify(case.exit_code, &normalized, "", timed_out, "", None);
         assert_eq!(
             result.code,
             case.expected_code,

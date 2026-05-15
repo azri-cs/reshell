@@ -2,6 +2,7 @@ use super::{validator, CompactionHint, ExecRequest, ExecResult, NextAction, Outp
 use crate::classify::normalize::normalize_stderr;
 use crate::classify::{classify, taxonomy::RecoveryCode};
 use crate::compact;
+use crate::config::ReshellConfig;
 use crate::env::Detector;
 use crate::memory::pattern::Pattern;
 use crate::memory::Store;
@@ -72,20 +73,27 @@ static BLOCKED_ENV_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
 
 pub struct Runner {
     store: Store,
+    config: ReshellConfig,
 }
 
 impl Runner {
     pub fn new() -> anyhow::Result<Self> {
         let store = Store::new()?;
-        Ok(Self { store })
+        Ok(Self { store, config: ReshellConfig::default() })
+    }
+
+    pub fn new_with_config(config: ReshellConfig) -> anyhow::Result<Self> {
+        let store = Store::new()?;
+        Ok(Self { store, config })
     }
 
     pub fn with_store(store: Store) -> Self {
-        Self { store }
+        Self { store, config: ReshellConfig::default() }
     }
 
     pub async fn run(&self, req: &ExecRequest) -> anyhow::Result<ExecResult> {
         let execution_id = uuid::Uuid::new_v4().to_string();
+        let mut persistence_warnings: Vec<String> = Vec::new();
 
         // 1. Validate
         if let Err(e) = validator::validate(&req.command) {
@@ -131,7 +139,7 @@ impl Runner {
         }
 
         // 2. Execute
-        let detector = Detector::cached().await.clone();
+        let detector = Detector::cached().await;
         let shell = detector.execution_shell();
         let retry_shell = detector.recovery_shell();
         let retry_request = retry_shell
@@ -163,6 +171,7 @@ impl Runner {
                     &attempt.stdout,
                     attempt.timed_out,
                     &detector.shell,
+                    Some(&self.config),
                 )
                 .code
                     == RecoveryCode::R25
@@ -194,6 +203,7 @@ impl Runner {
             &scrubbed_stdout,
             timed_out,
             &detector.shell,
+            Some(&self.config),
         );
 
         // 4b. Audit log
@@ -209,7 +219,7 @@ impl Runner {
             )
             .await
         {
-            eprintln!("rsh: warning: failed to write audit log: {}", e);
+            persistence_warnings.push(format!("Failed to write audit log: {}", e));
         }
 
         // 5. Compact output
@@ -248,10 +258,10 @@ impl Runner {
             )
             .await
         {
-            eprintln!(
-                "rsh: warning: failed to persist output (output_id={}): {}",
+            persistence_warnings.push(format!(
+                "Failed to persist output (output_id={}): {}",
                 output_id, e
-            );
+            ));
         }
 
         if classification.code != RecoveryCode::R10 && !resolved.matched_pattern_row {
@@ -273,7 +283,7 @@ impl Runner {
                 platform_tag: Some(crate::memory::pattern::current_platform_tag().to_string()),
             };
             if let Err(e) = self.store.save_pattern(&learned_pattern).await {
-                eprintln!("rsh: warning: failed to save learned pattern: {}", e);
+                persistence_warnings.push(format!("Failed to save learned pattern: {}", e));
             }
         }
 
@@ -285,7 +295,7 @@ impl Runner {
                 .auto_bump_fix_success(&normalized_command, true)
                 .await
             {
-                eprintln!("rsh: warning: failed to auto-bump fix success: {}", e);
+                persistence_warnings.push(format!("Failed to auto-bump fix success: {}", e));
             }
         }
 
@@ -348,7 +358,7 @@ impl Runner {
             next_action,
             compaction_hint,
             platform: Some(platform_tag),
-            warnings,
+            warnings: warnings.into_iter().chain(persistence_warnings).collect(),
         })
     }
 

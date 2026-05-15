@@ -43,10 +43,10 @@ pub struct AllowlistConfig {
 static ALLOWLIST_CONFIG: Lazy<AllowlistConfig> = Lazy::new(|| match load_allowlist_config() {
     Ok(config) => config,
     Err(e) => {
-        eprintln!(
-            "rsh: warning: failed to load allowlist config: {}; using blocklist mode",
+        crate::config::warn(&format!(
+            "failed to load allowlist config: {}; using blocklist mode",
             e
-        );
+        ));
         AllowlistConfig {
             mode: SandboxMode::Blocklist,
             allowed_commands: HashSet::new(),

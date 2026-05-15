@@ -23,7 +23,7 @@ use super::taxonomy::RecoveryCode;
 static USER_PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| match load_user_patterns() {
     Ok(patterns) => patterns,
     Err(e) => {
-        eprintln!("rsh: warning: failed to load user patterns: {}", e);
+        crate::config::warn(&format!("failed to load user patterns: {}", e));
         Vec::new()
     }
 });
@@ -83,12 +83,12 @@ fn load_user_patterns() -> anyhow::Result<Vec<Pattern>> {
         match parse_user_pattern(def) {
             Ok(p) => patterns.push(p),
             Err(e) => {
-                eprintln!(
-                    "rsh: warning: skipping pattern #{} in {}: {}",
+                crate::config::warn(&format!(
+                    "skipping pattern #{} in {}: {}",
                     i + 1,
                     path.display(),
                     e
-                );
+                ));
             }
         }
     }

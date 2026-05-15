@@ -31,10 +31,12 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "rsh_env",
-            "description": "Detect and describe the current shell environment: OS, shell type/version, available dev tools, package manager. Call this at the start of a session to understand the target environment before running commands.",
+            "description": "Detect and describe the current shell environment: OS, shell type/version, available dev tools, package manager. Call at session start. Pass refresh=true after installing new tools.",
             "inputSchema": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "refresh": { "type": "boolean", "description": "Force re-detection of environment (useful after installing new tools)" }
+                }
             }
         }),
         json!({
@@ -135,11 +137,15 @@ pub(crate) async fn handle_tool_call(
             }
         }
         "rsh_env" => {
-            let detector = Detector::cached().await.clone();
+            let refresh = arguments.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false);
+            if refresh {
+                Detector::invalidate_cache().await;
+            }
+            let detector = Detector::cached().await;
             (json!(detector), false)
         }
         "rsh_check" => {
-            let detector = Detector::cached().await.clone();
+            let detector = Detector::cached().await;
             let store = {
                 let s = state.lock().await;
                 s.store.clone()
@@ -168,14 +174,14 @@ pub(crate) async fn handle_tool_call(
                     "package_manager": detector.package_manager,
                 },
                 "usage": {
-                    "workflow": "rsh_exec → on failure check next_action → call rsh_recover → rsh_exec (retry with fix)",
+                    "workflow": "rsh_exec → on failure check next_action → call rsh_recover → rsh_exec (retry with fix) → rsh_feedback to record outcome",
                     "tools": {
                         "rsh_exec": "Execute commands with automatic failure classification and recovery hints. Always use this instead of raw bash.",
                         "rsh_recover": "Call when rsh_exec returns status='failed'. Pass recovery_code and original_command from the response.",
                         "rsh_compact": "Call when rsh_exec returns truncated=true. Use the output_id from the response with view='skeleton' for structural summary.",
                         "rsh_env": "Detect OS, shell, available dev tools, and package manager. Call at session start.",
                         "rsh_check": "This tool — verify reshell is working and get usage guidance.",
-                        "rsh_feedback": "Call after a recovery fix succeeds or fails. Pass original_command, fix_command, and success to improve pattern memory."
+                        "rsh_feedback": "CRITICAL: Call EVERY TIME you try a fix from rsh_recover.\n  Example: after rsh_exec 'brew install gh' succeeds, call rsh_feedback\n  { original_command: 'gh pr view', fix_command: 'brew install gh', success: true }.\n  This builds pattern memory so future failures resolve instantly.\n  If fix FAILS, report success: false to downgrade the pattern."
                     },
                     "recovery_codes": {
                         "R10": "Success — no action needed.",
@@ -264,7 +270,7 @@ pub(crate) async fn handle_tool_call(
                 };
 
             let code = parse_recovery_code(&recovery_code);
-            let detector = Detector::cached().await.clone();
+            let detector = Detector::cached().await;
 
             let resolved = match resolve_suggestion(
                 &store,

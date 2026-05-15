@@ -1,6 +1,8 @@
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::process::Command;
-use tokio::sync::OnceCell;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Detector {
@@ -21,16 +23,27 @@ pub struct ToolInfo {
     pub version: Option<String>,
 }
 
-static CACHED_DETECTOR: OnceCell<Detector> = OnceCell::const_new();
+static CACHED_DETECTOR: Lazy<RwLock<Option<Arc<Detector>>>> = Lazy::new(|| RwLock::new(None));
 
 impl Detector {
     /// Returns a cached Detector, creating it on first call.
     /// The environment rarely changes within a process lifetime,
     /// so subsequent calls return the same instance.
-    pub async fn cached() -> &'static Self {
-        CACHED_DETECTOR
-            .get_or_init(|| async { Self::new().await.unwrap_or_default() })
-            .await
+    pub async fn cached() -> Detector {
+        let guard = CACHED_DETECTOR.read().await;
+        if let Some(detector) = guard.as_ref() {
+            return Detector::clone(detector);
+        }
+        drop(guard);
+
+        let detector = Arc::new(Self::new().await.unwrap_or_default());
+        *CACHED_DETECTOR.write().await = Some(detector.clone());
+        Detector::clone(&detector)
+    }
+
+    /// Invalidate the cached detector. Next call to cached() will re-detect.
+    pub async fn invalidate_cache() {
+        *CACHED_DETECTOR.write().await = None;
     }
 
     pub async fn new() -> anyhow::Result<Self> {

@@ -24,6 +24,8 @@ pub(crate) struct ServerState {
 impl McpServer {
     /// Open the pattern store and start server state. Fails if `~/.reshell` or the DB cannot be opened.
     pub fn new() -> anyhow::Result<Self> {
+        // Suppress stderr warnings in MCP mode so they don't interleave with JSON-RPC frames.
+        crate::config::suppress_stderr_warnings();
         let store = Store::new()?;
         Ok(Self {
             state: Arc::new(Mutex::new(ServerState { store })),

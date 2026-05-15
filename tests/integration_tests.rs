@@ -521,3 +521,126 @@ async fn test_mcp_missing_content_length() {
 
     let _ = child.kill().await;
 }
+
+/// Helper: spawn an MCP server, initialize, return (child, stdin, reader).
+async fn spawn_mcp_server(home: &std::path::Path) -> (tokio::process::Child, tokio::process::ChildStdin, BufReader<tokio::process::ChildStdout>) {
+    let mut child = Command::new(rsh_bin())
+        .args(["mcp"])
+        .env("HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn MCP server");
+    let mut stdin = child.stdin.take().expect("Failed to open stdin");
+    let stdout = child.stdout.take().expect("Failed to open stdout");
+    let mut reader = BufReader::new(stdout);
+
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}});
+    write_frame(&mut stdin, &init).await;
+    let _ = read_frame(&mut reader).await;
+    let note = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    write_frame(&mut stdin, &note).await;
+
+    (child, stdin, reader)
+}
+
+#[tokio::test]
+async fn test_mcp_feedback_and_stats() {
+    let home = unique_home_dir();
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+
+    // Execute a failing command and capture its stderr for feedback
+    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"nonexistent_feedback_test_cmd_xyz"}}});
+    write_frame(&mut stdin, &exec).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let exec_result: Value = serde_json::from_str(text).unwrap();
+    let stderr = exec_result["output"]["stderr"].as_str().unwrap_or("");
+
+    // Send feedback with the stderr from the original failure
+    let fb = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rsh_feedback","arguments":{"original_command":"nonexistent_feedback_test_cmd_xyz","fix_command":"echo fixed","success":true,"stderr":stderr}}});
+    write_frame(&mut stdin, &fb).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let fb_result: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(fb_result["status"], "recorded");
+
+    // Verify stats reflect the learning
+    let stats = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"rsh_stats","arguments":{}}});
+    write_frame(&mut stdin, &stats).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let st: Value = serde_json::from_str(text).unwrap();
+    assert!(st["patterns"]["total"].as_i64().unwrap_or(0) > 0, "stats should show at least 1 pattern");
+    assert!(st["patterns"]["by_recovery_code"].is_array() || st["patterns"]["by_recovery_code"].is_object(), "by_recovery_code should be present");
+
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_resources_list_and_read() {
+    let home = unique_home_dir();
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+
+    // Execute a command to create stored output
+    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo resource_test_output_42"}}});
+    write_frame(&mut stdin, &exec).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let inner: Value = serde_json::from_str(text).unwrap();
+    let output_id = inner["output_id"].as_str().unwrap().to_string();
+
+    // List resources
+    let list = json!({"jsonrpc":"2.0","id":3,"method":"resources/list"});
+    write_frame(&mut stdin, &list).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let resources = resp["result"]["resources"].as_array().unwrap();
+    assert!(!resources.is_empty(), "Resources should not be empty after exec");
+    let found = resources.iter().any(|r| r["uri"].as_str().unwrap().contains(&output_id));
+    assert!(found, "Resource should include the output from exec");
+
+    // Read the specific resource
+    let read = json!({"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri": format!("reshell://output/{}", output_id)}});
+    write_frame(&mut stdin, &read).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let contents = resp["result"]["contents"][0]["text"].as_str().unwrap();
+    assert!(contents.contains("resource_test_output_42"));
+
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_prompts_list_and_get() {
+    let home = unique_home_dir();
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+
+    // List prompts
+    let list = json!({"jsonrpc":"2.0","id":2,"method":"prompts/list"});
+    write_frame(&mut stdin, &list).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let prompts = resp["result"]["prompts"].as_array().unwrap();
+    let names: Vec<&str> = prompts.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"recovery_analysis"), "Should have recovery_analysis prompt");
+    assert!(names.contains(&"environment_audit"), "Should have environment_audit prompt");
+
+    // Get recovery_analysis prompt
+    let get = json!({"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"recovery_analysis","arguments":{"recovery_code":"R22","original_command":"gh pr view"}}});
+    write_frame(&mut stdin, &get).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let messages = resp["result"]["messages"].as_array().unwrap();
+    assert!(!messages.is_empty());
+    let text = messages[0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("recovery_code"), "Prompt should discuss failure analysis");
+
+    // Get environment_audit prompt
+    let get = json!({"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"environment_audit"}});
+    write_frame(&mut stdin, &get).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let messages = resp["result"]["messages"].as_array().unwrap();
+    assert!(!messages.is_empty());
+    let text = messages[0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("rsh_env") || text.contains("environment"), "Prompt should reference environment detection");
+
+    let _ = child.kill().await;
+}

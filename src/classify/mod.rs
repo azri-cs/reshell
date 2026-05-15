@@ -40,6 +40,7 @@ pub fn classify(
     stdout: &str,
     timed_out: bool,
     detected_shell: &str,
+    config: Option<&crate::config::ReshellConfig>,
 ) -> ClassificationResult {
     if timed_out {
         return ClassificationResult {
@@ -117,7 +118,11 @@ pub fn classify(
     }
 
     // Large stdout with no clearer stderr signal: suggest scoping output (R26).
-    let large_stdout = crate::config::get().compaction.large_stdout_bytes;
+    let large_stdout = if let Some(cfg) = config {
+        cfg.compaction.large_stdout_bytes
+    } else {
+        crate::config::get().compaction.large_stdout_bytes
+    };
     if exit_code != 0 && stdout.len() > large_stdout {
         return ClassificationResult {
             code: RecoveryCode::R26,
@@ -137,44 +142,46 @@ mod tests {
 
     #[test]
     fn test_success() {
-        let r = classify(0, "", "", false, "");
+        let r = classify(0, "", "", false, "", None);
         assert_eq!(r.code, RecoveryCode::R10);
     }
 
     #[test]
     fn test_command_not_found() {
-        let r = classify(127, "gh: command not found", "", false, "");
+        let r = classify(127, "gh: command not found", "", false, "", None);
         assert_eq!(r.code, RecoveryCode::R22);
     }
 
     #[test]
     fn test_syntax_error() {
-        let r = classify(2, "invalid option -- 'z'", "", false, "");
+        let r = classify(2, "invalid option -- 'z'", "", false, "", None);
         assert_eq!(r.code, RecoveryCode::R20);
     }
 
     #[test]
     fn test_permission_denied() {
-        let r = classify(126, "Permission denied", "", false, "");
+        let r = classify(126, "Permission denied", "", false, "", None);
         assert_eq!(r.code, RecoveryCode::R21);
     }
 
     #[test]
     fn test_subcommand_failure() {
-        let r = classify(1, "npm ERR! code ENOENT", "", false, "");
+        let r = classify(1, "npm ERR! code ENOENT", "", false, "", None);
         assert_eq!(r.code, RecoveryCode::R24);
     }
 
     #[test]
     fn test_timeout() {
-        let r = classify(124, "", "", true, "");
+        let r = classify(124, "", "", true, "", None);
         assert_eq!(r.code, RecoveryCode::R23);
     }
 
     #[test]
     fn test_large_stdout_hints_r26() {
-        let big = "x".repeat(600 * 1024);
-        let r = classify(1, "", &big, false, "");
+        // Use test defaults (small large_stdout_bytes = 1024 so test is fast)
+        let cfg = crate::config::ReshellConfig::test_defaults();
+        let big = "x".repeat(2000);
+        let r = classify(1, "", &big, false, "", Some(&cfg));
         assert_eq!(r.code, RecoveryCode::R26);
     }
 }

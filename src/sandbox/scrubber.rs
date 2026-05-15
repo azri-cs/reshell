@@ -125,7 +125,7 @@ fn scrub_high_entropy_strings(text: &str, threshold: f64) -> String {
     }
 
     // Check trailing candidate
-    if current_candidate.len() >= 32 && shannon_entropy(&current_candidate) > 3.5 {
+    if current_candidate.len() >= 32 && shannon_entropy(&current_candidate) > threshold {
         result.push_str("[REDACTED]");
     } else {
         result.push_str(&current_candidate);
@@ -267,5 +267,23 @@ mod tests {
         let scrubbed = scrub_secrets(text);
         // The auth value should be redacted
         assert!(!scrubbed.contains("dXNlcm5hbWU6cGFzc3dvcmQ="));
+    }
+
+    #[test]
+    fn test_respects_custom_entropy_threshold() {
+        // A 48-char hex string with moderate entropy (~3.8 at default 3.5)
+        let moderate_hex = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2";
+        // At default threshold 3.5, trailing candidate should be redacted
+        let scrubbed_default = scrub_high_entropy_strings(moderate_hex, 3.5);
+        assert!(
+            scrubbed_default.contains("[REDACTED]"),
+            "Should redact at threshold 3.5"
+        );
+        // At a raised threshold 6.0, the string should pass through
+        let scrubbed_high = scrub_high_entropy_strings(moderate_hex, 6.0);
+        assert!(
+            !scrubbed_high.contains("[REDACTED]"),
+            "Should NOT redact at threshold 6.0"
+        );
     }
 }
