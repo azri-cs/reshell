@@ -31,7 +31,7 @@
 ## Trust code over docs
 - `README.md` and `RESHELL_PLAN.md` can drift; verify against `src/**` before claiming a feature exists. Taxonomy codes: `src/classify/taxonomy.rs`. MCP tool names and schemas: `src/mcp/tools.rs` (`list_tools`).
 - Aspirational / not implemented: OverlayFS sandbox, binary output detection, jq-like extraction, SSE transport (see `RESHELL_PLAN.md`).
-- The MCP server is **newline-delimited JSON-RPC over stdio** (`src/mcp/server.rs` reads `stdin.lines()`), not header-framed stdio MCP. Keep tests/clients aligned unless you upgrade the transport.
+- The MCP server uses **framed transport** (`Content-Length: N\r\n\r\n<body>`) per the MCP specification, NOT newline-delimited JSON. Raw JSON without a Content-Length header will be rejected with a `Frame read error: Missing Content-Length header`. Keep tests/clients aligned unless you upgrade the transport.
 - **`McpServer::new()`** returns `anyhow::Result` if `~/.reshell/patterns.db` cannot be opened (library embedders: handle errors instead of assuming infallible startup).
 - **`rsh_recover`** tool: optional `stderr` in arguments (see `list_tools`); exec failures put a stderr snippet on **`next_action.params`** for pattern lookup. Same suggestion path as `src/exec/runner.rs` via `src/recover/resolve.rs`.
 - The "safety sandbox" is pre-exec validation (patterns, interactive commands), optional `~/.reshell/allowlist.toml` command allowlist (`src/sandbox/allowlist.rs`), and stderr secret scrubbing (`src/sandbox/scrubber.rs`). No filesystem or network isolation exists.

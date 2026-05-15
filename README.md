@@ -11,7 +11,7 @@
 - **Output Compaction** — Prevents context-window pollution by truncating large outputs into head + structural skeleton + tail.
 - **Pattern Memory** — SQLite-backed learning from previous failures to provide high-confidence instant fixes on recurrence.
 - **Safety Sandbox** — Pre-exec validation blocks dangerous and interactive commands, optional command allowlist via `~/.reshell/allowlist.toml`, and stderr secret scrubbing. There is no filesystem or network isolation.
-- **MCP Server** — Exposes `rsh_exec`, `rsh_env`, `rsh_recover`, `rsh_compact`, and `rsh_check` over **newline-delimited JSON-RPC on stdio** (one request object per line).
+- **MCP Server** — Exposes 7 tools (`rsh_exec`, `rsh_env`, `rsh_recover`, `rsh_compact`, `rsh_check`, `rsh_feedback`, `rsh_stats`) over **framed MCP transport** (`Content-Length` header + JSON body) on stdio.
 
 ---
 
@@ -50,7 +50,7 @@ sudo cp target/release/rsh /usr/local/bin/
 
 ## Agent Configuration
 
-Reshell exposes an **MCP server** on stdio (newline-delimited JSON-RPC). Configure your agent to invoke `rsh mcp`.
+Reshell exposes an **MCP server** on stdio (framed transport with `Content-Length` headers, per the MCP specification). Configure your agent to invoke `rsh mcp`.
 
 ### Claude Code
 
@@ -314,7 +314,7 @@ Integration tests verify:
 - [x] Recovery Engine — Deterministic suggestions per class
 - [x] Output Compaction — Head/skeleton/tail truncation
 - [x] Pattern Memory — SQLite-backed persistence
-- [x] MCP Server — newline-delimited JSON-RPC stdio for Claude Code / OpenCode / Cursor
+- [x] MCP Server — framed stdio transport (Content-Length headers) for Claude Code / OpenCode / Cursor
 - [x] Optional command allowlist — `~/.reshell/allowlist.toml` (see `src/sandbox/allowlist.rs`)
 - [ ] Safety Hardening — OverlayFS or equivalent filesystem isolation; Linux seccomp syscall filtering (stub in `src/sandbox/seccomp.rs`)
 - [ ] Distribution — `cargo install`, Homebrew formula
