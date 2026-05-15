@@ -9,6 +9,9 @@ const MAX_STORED_OUTPUT_ROWS: usize = 5000;
 
 #[derive(Clone)]
 pub struct Store {
+    /// SQLite connection, wrapped in Arc+Mutex for thread-safe sharing
+    /// across spawn_blocking tasks. WAL mode allows concurrent reads;
+    /// the mutex serializes write transactions.
     conn: Arc<Mutex<Connection>>,
 }
 
@@ -100,6 +103,9 @@ impl Store {
         })
     }
 
+    /// Run a database operation on the shared connection (serialized via Mutex).
+    /// WAL mode enables concurrent reads at the SQLite level; the Mutex serializes
+    /// write transactions from multiple spawn_blocking tasks.
     async fn run_db<F, R>(&self, f: F) -> anyhow::Result<R>
     where
         F: FnOnce(&Connection) -> anyhow::Result<R> + Send + 'static,
@@ -112,6 +118,17 @@ impl Store {
         })
         .await
         .map_err(|e| anyhow::anyhow!("database task join: {}", e))?
+    }
+
+    /// Alias for run_db for documentation purposes (indicates a write operation).
+    /// Uses the same Mutex — a connection pool (e.g. r2d2_sqlite) would allow
+    /// true concurrent reads with WAL mode.
+    async fn run_db_write<F, R>(&self, f: F) -> anyhow::Result<R>
+    where
+        F: FnOnce(&Connection) -> anyhow::Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.run_db(f).await
     }
 
     pub fn next_output_id(&self) -> String {
@@ -161,7 +178,7 @@ impl Store {
 
     pub async fn save_pattern(&self, pattern: &Pattern) -> anyhow::Result<()> {
         let pattern = pattern.clone();
-        self.run_db(move |conn| {
+        self.run_db_write(move |conn| {
             conn.execute(
                 "INSERT INTO patterns (command_hash, command_template, recovery_code, stderr_pattern,
                                        fix_command, fix_success_rate, last_used, usage_count, platform_tag)
@@ -221,7 +238,7 @@ impl Store {
         let original_command = original_command.to_string();
         let stdout = stdout.to_string();
         let stderr = stderr.to_string();
-        self.run_db(move |conn| {
+        self.run_db_write(move |conn| {
             conn.execute(
                 "INSERT INTO outputs (output_id, execution_id, original_command, stdout, stderr, exit_code)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -431,7 +448,7 @@ impl Store {
         let recovery_code = recovery_code.to_string();
         let original_command = original_command.to_string();
         let suggested_action = suggested_action.to_string();
-        self.run_db(move |conn| {
+        self.run_db_write(move |conn| {
             conn.execute(
                 "INSERT INTO recovery_attempts (recovery_code, original_command, suggested_action)
                  VALUES (?1, ?2, ?3)",
@@ -456,7 +473,7 @@ impl Store {
         let command_template = command_template.to_string();
         let stderr = stderr.to_string();
         let fix_command = fix_command.map(|s| s.to_string());
-        self.run_db(move |conn| {
+        self.run_db_write(move |conn| {
             // Find the matching pattern using LIKE (same fuzzy logic as find_pattern)
             let mut stmt = conn.prepare_cached(
                 "SELECT id, fix_success_rate, usage_count
@@ -506,7 +523,7 @@ impl Store {
         fix_success: bool,
     ) -> anyhow::Result<()> {
         let command_template = command_template.to_string();
-        self.run_db(move |conn| {
+        self.run_db_write(move |conn| {
             let score = if fix_success { 1.0_f64 } else { 0.0_f64 };
             conn.execute(
                 "UPDATE patterns
@@ -606,7 +623,7 @@ impl Store {
         let command_template = command_template.to_string();
         let cwd = cwd.unwrap_or("").to_string();
         let recovery_code = recovery_code.to_string();
-        self.run_db(move |conn| {
+        self.run_db_write(move |conn| {
             conn.execute(
                 "INSERT INTO audit_log (command_hash, command_template, cwd, exit_code, recovery_code, validation_passed)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

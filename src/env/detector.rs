@@ -59,9 +59,9 @@ impl Detector {
         );
         let shell = shell.unwrap_or_else(|_| "/bin/sh".to_string());
         let shell_version = if shell.contains("bash") {
-            bash_ver.ok()
+            bash_ver.ok().map(|v| extract_version(&v))
         } else if shell.contains("zsh") {
-            zsh_ver.ok()
+            zsh_ver.ok().map(|v| extract_version(&v))
         } else {
             None
         };
@@ -86,13 +86,12 @@ impl Detector {
                 if output.status.success() {
                     available_tools.push(ToolInfo {
                         name,
-                        version: Some(
+                        version: Some(extract_version(
                             String::from_utf8_lossy(&output.stdout)
                                 .lines()
                                 .next()
-                                .unwrap_or("")
-                                .to_string(),
-                        ),
+                                .unwrap_or(""),
+                        )),
                     });
                 }
             }
@@ -186,5 +185,24 @@ impl Detector {
                 String::from_utf8_lossy(&output.stderr)
             ))
         }
+    }
+}
+
+/// Extract a clean version number from raw --version output.
+/// Strips common prefixes (e.g. "Docker version 27.3.1, build ce12230" → "27.3.1").
+fn extract_version(raw: &str) -> String {
+    let version = raw
+        .trim()
+        .trim_start_matches(|c: char| !c.is_ascii_digit() && c != 'v' && c != 'V')
+        .trim_start_matches(|c: char| c == 'v' || c == 'V')
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if version.is_empty() {
+        // If no version-like prefix found, return the original (trimmed)
+        raw.trim().to_string()
+    } else {
+        version
     }
 }

@@ -48,6 +48,7 @@ seccomp = ["libseccomp"]
 tokio-test = "0.4"
 insta = { version = "1", features = ["json"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1"
 
 [[bench]]
 name = "compaction_bench"
