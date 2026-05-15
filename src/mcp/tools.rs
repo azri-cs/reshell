@@ -16,7 +16,7 @@ pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "rsh_exec",
-            "description": "Execute a shell command with automatic failure classification, secret scrubbing, and recovery suggestions. PREFER THIS over raw bash for any command that might fail. When this returns status='failed', check the next_action field for the recovery tool to call, or use rsh_recover with the returned recovery_code and original_command. When output is truncated (truncated=true), use rsh_compact with the returned output_id.",
+            "description": "Execute a shell command with automatic failure classification, secret scrubbing, and recovery suggestions. USE THIS INSTEAD of raw bash/shell for ALL commands that install packages, run builds, modify files, or could fail with cryptic errors. On failure, check the auto_retry field first (high-confidence R22 fixes are auto-applied). Then check next_action for the recovery tool to call. When output is truncated (truncated=true), use rsh_compact with the returned output_id. Anti-pattern: using raw bash alongside rsh_exec — pick one and use it consistently.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -63,6 +63,29 @@ pub fn list_tools() -> Vec<Value> {
                     "file": { "type": "string", "description": "Path to a file to compact (must be within working directory)" },
                     "view": { "type": "string", "enum": ["full", "skeleton", "diff", "errors_only"], "default": "skeleton", "description": "Compaction view to apply" }
                 }
+            }
+        }),
+        json!({
+            "name": "rsh_read_file",
+            "description": "Read a file through the reshell safety sandbox. Path traversal (..), symlinks outside the working directory, and sensitive system files (/etc/shadow, /proc, /sys, /dev) are blocked. USE THIS instead of raw cat/read for any file path that might be user-supplied or untrusted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to read (relative or absolute within allowed locations)" }
+                },
+                "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "rsh_write_file",
+            "description": "Write content to a file through the reshell safety sandbox. Same security rules as rsh_read_file. Creates parent directories if needed. USE THIS instead of shell redirection (> or tee) for writing files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to write to" },
+                    "content": { "type": "string", "description": "Content to write" }
+                },
+                "required": ["path", "content"]
             }
         }),
         json!({
@@ -434,6 +457,32 @@ pub(crate) async fn handle_tool_call(
                 }
             });
             (stats, false)
+        }
+        "rsh_read_file" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            match paths::validate_and_read_file(path) {
+                Ok((resolved_path, content)) => {
+                    (json!({
+                        "path": resolved_path.to_string_lossy(),
+                        "content": content,
+                        "line_count": content.lines().count(),
+                    }), false)
+                }
+                Err(e) => (json!({"error": format!("File read blocked: {}", e)}), true),
+            }
+        }
+        "rsh_write_file" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let content = arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            match paths::validate_and_create_file(path, content) {
+                Ok(resolved_path) => {
+                    (json!({
+                        "path": resolved_path.to_string_lossy(),
+                        "bytes_written": content.len(),
+                    }), false)
+                }
+                Err(e) => (json!({"error": format!("File write blocked: {}", e)}), true),
+            }
         }
         _ => (json!({ "error": format!("Unknown tool: {}", name) }), true),
     }

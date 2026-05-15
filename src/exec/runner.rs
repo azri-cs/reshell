@@ -76,6 +76,22 @@ pub struct Runner {
     config: ReshellConfig,
 }
 
+/// Returns true for commands that are trivially simple (no pipes, redirects,
+/// subshells, variables, or shell operators). Simple commands skip DB persistence
+/// for successful results since there's nothing to learn from "echo hello".
+fn is_simple_command(command: &str) -> bool {
+    !command.contains('|')
+        && !command.contains('>')
+        && !command.contains('<')
+        && !command.contains('$')
+        && !command.contains('`')
+        && !command.contains("&&")
+        && !command.contains("||")
+        && !command.contains(';')
+        && !command.contains('&')
+        && !command.contains('~')
+}
+
 impl Runner {
     pub fn new() -> anyhow::Result<Self> {
         let store = Store::new()?;
@@ -135,6 +151,7 @@ impl Runner {
                 compaction_hint: None,
                 platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
                 warnings: vec![],
+                auto_retry: None,
             });
         }
 
@@ -189,9 +206,18 @@ impl Runner {
         let timed_out = attempt.timed_out;
         let warnings = attempt.warnings;
 
-        // 3. Scrub secrets from both stderr and stdout
-        let scrubbed_stderr = scrubber::scrub_secrets(&stderr);
-        let scrubbed_stdout = scrubber::scrub_secrets(&stdout);
+        // 3. Scrub secrets from both stderr and stdout.
+        // Skip costly scrubbing for small success outputs (no secrets expected).
+        let scrubbed_stderr = if exit_code == 0 && stderr.len() < 256 {
+            stderr.clone()
+        } else {
+            scrubber::scrub_secrets(&stderr)
+        };
+        let scrubbed_stdout = if exit_code == 0 && stdout.len() < 1024 {
+            stdout.clone()
+        } else {
+            scrubber::scrub_secrets(&stdout)
+        };
 
         // 3b. Normalize stderr for cross-shell classification
         let normalized_stderr = normalize_stderr(&scrubbed_stderr);
@@ -205,6 +231,33 @@ impl Runner {
             &detector.shell,
             Some(&self.config),
         );
+
+        // Fast path: for simple successful commands, skip DB persistence,
+        // compaction, and recovery suggestion (nothing to learn from
+        // "echo hello" succeeding).
+        let is_simple = is_simple_command(&req.command);
+        if classification.code == RecoveryCode::R10 && is_simple {
+            return Ok(ExecResult {
+                status: "success".to_string(),
+                recovery_code: "R10".to_string(),
+                recovery_class: "Success".to_string(),
+                original_command: req.command.clone(),
+                execution_id,
+                output_id: None,
+                suggestion: serde_json::json!({"action":"none","confidence":"high","reason":"Command succeeded (fast path)"}),
+                output: OutputInfo {
+                    stdout: scrubbed_stdout,
+                    stderr: scrubbed_stderr,
+                    exit_code,
+                    truncated: false,
+                },
+                next_action: None,
+                compaction_hint: None,
+                platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
+                warnings: persistence_warnings,
+                auto_retry: None,
+            });
+        }
 
         // 4b. Audit log
         if let Err(e) = self
@@ -299,6 +352,67 @@ impl Runner {
             }
         }
 
+        // Auto-retry: for R22 (Command Not Found) with a high-confidence fix,
+        // execute the fix command inline (via execute_once, avoiding recursive run()).
+        let auto_retry_result = if classification.code == RecoveryCode::R22
+            && suggestion.confidence == "high"
+            && suggestion.command.is_some()
+            && req.retry
+        {
+            let fix_cmd = suggestion.command.as_ref().unwrap();
+            if fix_cmd != &req.command {
+                let fix_req = ExecRequest {
+                    command: fix_cmd.clone(),
+                    cwd: req.cwd.clone(),
+                    timeout: req.timeout.min(60), // cap at 60s for auto-retry
+                    env: req.env.clone(),
+                    retry: false,
+                };
+                // Use execute_once directly (avoids recursive run() call)
+                let fix_attempt = self.execute_once(&fix_req, &detector.execution_shell()).await;
+                match fix_attempt {
+                    Ok(attempt) => {
+                        let success = attempt.exit_code == 0;
+                        // Auto-record feedback
+                        let _ = self
+                            .store
+                            .update_fix_outcome(
+                                &normalized_command,
+                                &normalized_stderr,
+                                Some(fix_cmd),
+                                success,
+                            )
+                            .await;
+                        Some(Box::new(ExecResult {
+                            status: if success { "success".to_string() } else { "failed".to_string() },
+                            recovery_code: if success { "R10".to_string() } else { "R22".to_string() },
+                            recovery_class: if success { "Success".to_string() } else { "Command Not Found".to_string() },
+                            original_command: fix_req.command.clone(),
+                            execution_id: uuid::Uuid::new_v4().to_string(),
+                            output_id: None,
+                            suggestion: serde_json::json!({"action":"none","confidence":"high","reason":"Auto-retry of R22 fix"}),
+                            output: OutputInfo {
+                                stdout: attempt.stdout,
+                                stderr: attempt.stderr,
+                                exit_code: attempt.exit_code,
+                                truncated: false,
+                            },
+                            next_action: None,
+                            compaction_hint: None,
+                            platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
+                            warnings: attempt.warnings,
+                            auto_retry: None,
+                        }))
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let status = if classification.code == RecoveryCode::R10 {
             "success"
         } else {
@@ -359,6 +473,7 @@ impl Runner {
             compaction_hint,
             platform: Some(platform_tag),
             warnings: warnings.into_iter().chain(persistence_warnings).collect(),
+            auto_retry: auto_retry_result,
         })
     }
 

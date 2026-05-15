@@ -101,6 +101,78 @@ fn validate_file_metadata(canonical: &Path) -> anyhow::Result<PathBuf> {
     Ok(canonical.to_path_buf())
 }
 
+/// Validate and write file content through the safety sandbox.
+/// Creates parent directories if needed (within allowed path).
+pub fn validate_and_create_file(file_path: &str, content: &str) -> anyhow::Result<PathBuf> {
+    let path = Path::new(file_path);
+    let path_str = path.to_string_lossy();
+
+    // Block traversal
+    if path_str.contains("..") {
+        anyhow::bail!("Path traversal blocked: '..' not allowed in file path");
+    }
+
+    let cwd = std::env::current_dir()?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    // Block sensitive paths by prefix
+    let abs_str = absolute.to_string_lossy();
+    let blocked_prefixes = [
+        "/etc/shadow",
+        "/etc/passwd",
+        "/etc/ssh",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/root/.ssh",
+    ];
+    for prefix in &blocked_prefixes {
+        if abs_str.starts_with(prefix) {
+            anyhow::bail!(
+                "Access denied: path '{}' is outside the allowed directory",
+                file_path
+            );
+        }
+    }
+
+    // Resolve the parent as realpath to catch symlink-based traversal
+    if let Some(parent) = absolute.parent() {
+        if parent.exists() {
+            let canonical_parent = parent
+                .canonicalize()
+                .map_err(|e| anyhow::anyhow!("Cannot resolve parent directory: {}", e))?;
+            if !canonical_parent.starts_with(&cwd) {
+                anyhow::bail!(
+                    "Path traversal blocked: '{}' resolves outside working directory",
+                    file_path
+                );
+            }
+            // Create parent directories within allowed path
+            std::fs::create_dir_all(&canonical_parent)?;
+            let full_path = canonical_parent.join(
+                absolute
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid file name"))?,
+            );
+            std::fs::write(&full_path, content)?;
+            Ok(full_path)
+        } else {
+            // Parent doesn't exist, try the CWD-based path
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(&absolute, content)?;
+            Ok(absolute)
+        }
+    } else {
+        // No parent (e.g., current directory)
+        std::fs::write(&absolute, content)?;
+        Ok(absolute)
+    }
+}
+
 /// Validate a CWD (working directory) parameter to prevent directory traversal.
 pub fn validate_cwd(cwd: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(cwd);

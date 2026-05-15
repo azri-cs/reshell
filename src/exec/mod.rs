@@ -39,6 +39,9 @@ pub struct ExecResult {
     /// Non-fatal warnings (e.g., blocked env vars, security notices).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<String>,
+    /// If a high-confidence R22 fix was auto-applied, the result of that attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_retry: Option<Box<ExecResult>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

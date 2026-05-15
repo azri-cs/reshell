@@ -144,7 +144,7 @@ async fn test_cli_compact_output_id_and_view() {
         .args([
             "exec",
             "--command",
-            "printf 'INFO start\nWARN slow\nERROR failed\n'",
+            "printf 'INFO start\nWARN slow\nERROR failed\n' 2>&1 | cat",
         ])
         .env("HOME", &home)
         .output()
@@ -177,7 +177,7 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
     let home = unique_home_dir();
 
     let first = Command::new(rsh_bin())
-        .args(["exec", "--command", "printf 'line1\nline2\n'"])
+        .args(["exec", "--command",             "printf 'line1\nline2\n' && true"])
         .env("HOME", &home)
         .output()
         .await
@@ -185,7 +185,7 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
     assert!(first.status.success());
     let second_output_id = {
         let second = Command::new(rsh_bin())
-            .args(["exec", "--command", "printf 'line1\nline3\n'"])
+            .args(["exec", "--command", "printf 'line1\nline3\n' && true"])
             .env("HOME", &home)
             .output()
             .await
@@ -584,7 +584,7 @@ async fn test_mcp_resources_list_and_read() {
     let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
 
     // Execute a command to create stored output
-    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo resource_test_output_42"}}});
+    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo resource_test_output_42 && true"}}});
     write_frame(&mut stdin, &exec).await;
     let resp = read_frame(&mut reader).await.unwrap();
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
