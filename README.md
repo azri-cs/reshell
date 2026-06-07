@@ -11,7 +11,7 @@
 - **Output Compaction** — Prevents context-window pollution by truncating large outputs into head + structural skeleton + tail.
 - **Pattern Memory** — SQLite-backed learning from previous failures to provide high-confidence instant fixes on recurrence.
 - **Safety Sandbox** — Pre-exec validation blocks dangerous and interactive commands, optional command allowlist via `~/.reshell/allowlist.toml`, and stderr secret scrubbing. There is no filesystem or network isolation.
-- **MCP Server** — Exposes 7 tools (`rsh_exec`, `rsh_env`, `rsh_recover`, `rsh_compact`, `rsh_check`, `rsh_feedback`, `rsh_stats`) over **framed MCP transport** (`Content-Length` header + JSON body) on stdio.
+- **MCP Server** — Exposes 9 tools (`rsh_exec`, `rsh_env`, `rsh_recover`, `rsh_compact`, `rsh_read_file`, `rsh_write_file`, `rsh_check`, `rsh_feedback`, `rsh_stats`) and 2 prompts over **framed MCP transport** (`Content-Length` header + JSON body) on stdio.
 
 ---
 
@@ -97,7 +97,7 @@ Add to `.cursor/mcp.json` in your project root:
 }
 ```
 
-After adding the configuration, restart your agent. The agent will discover five tools: `rsh_exec`, `rsh_env`, `rsh_recover`, `rsh_compact`, and `rsh_check`.
+After adding the configuration, restart your agent. The agent will discover nine tools and two prompts.
 
 ---
 
@@ -205,6 +205,49 @@ Views: `full`, `skeleton`, `diff`, `errors_only`.
 
 Session health check and short onboarding: verifies the server is up and summarizes the `rsh_exec` → `rsh_recover` → `rsh_compact` workflow. **Input Schema:** `{}`
 
+### `rsh_read_file`
+
+Read a file through the safety sandbox (blocks path traversal and sensitive paths).
+
+**Input Schema:**
+```json
+{
+  "path": "/path/to/file.txt"
+}
+```
+
+### `rsh_write_file`
+
+Write content to a file through the safety sandbox (creates parent directories, blocks sensitive paths).
+
+**Input Schema:**
+```json
+{
+  "path": "/path/to/file.txt",
+  "content": "file contents here"
+}
+```
+
+### `rsh_feedback`
+
+Record the outcome of a fix attempt to update pattern memory. Call this after trying a recovery suggestion.
+
+**Input Schema:**
+```json
+{
+  "recovery_code": "R22",
+  "original_command": "gh pr view",
+  "suggested_command": "brew install gh && gh pr view",
+  "success": true
+}
+```
+
+### `rsh_stats`
+
+Get pattern memory statistics and runtime metrics: recovery attempts, pattern counts by recovery code, fix success rates, execution metrics.
+
+**Input Schema:** `{}`
+
 ---
 
 ## CLI Usage (Direct Mode)
@@ -223,6 +266,24 @@ rsh env
 # Compact a large file, or a stored output from a prior exec
 rsh compact --file /var/log/syslog
 rsh compact --output-id "<uuid>" --view errors_only
+```
+
+### Additional CLI flags
+
+```bash
+# Enable OverlayFS sandbox (Linux only)
+rsh exec --command "npm install" --sandbox
+
+# Generate shell completions
+rsh completions bash
+rsh completions zsh
+rsh completions fish
+
+# Extract JSON field
+rsh compact --file package.json --jq ".dependencies"
+
+# SSE transport for MCP
+rsh mcp --transport sse --port 3000
 ```
 
 ### Execution model
@@ -310,14 +371,19 @@ Integration tests verify:
 ## Roadmap
 
 - [x] Foundation — Command execution, timeout, structured JSON output
-- [x] Failure Taxonomy — Regex-driven classifiers (`R20`–`R30`)
+- [x] Failure Taxonomy — Regex-driven classifiers (R20–R30)
 - [x] Recovery Engine — Deterministic suggestions per class
 - [x] Output Compaction — Head/skeleton/tail truncation
 - [x] Pattern Memory — SQLite-backed persistence
 - [x] MCP Server — framed stdio transport (Content-Length headers) for Claude Code / OpenCode / Cursor
-- [x] Optional command allowlist — `~/.reshell/allowlist.toml` (see `src/sandbox/allowlist.rs`)
-- [ ] Safety Hardening — OverlayFS or equivalent filesystem isolation; Linux seccomp syscall filtering (stub in `src/sandbox/seccomp.rs`)
-- [ ] Distribution — `cargo install`, Homebrew formula
+- [x] Optional command allowlist — `~/.reshell/allowlist.toml`
+- [x] OverlayFS sandbox — Filesystem isolation (Linux, opt-in)
+- [x] Shell completions — bash, zsh, fish
+- [x] SSE transport — HTTP SSE endpoint for MCP
+- [x] jq-like extraction — JSON path queries in compact
+- [x] Docker image — Multi-stage container build
+- [x] Success metrics — Recovery rate, context savings, latency telemetry
+- [ ] Distribution — `cargo install`, Homebrew formula, crates.io publishing
 
 ---
 
