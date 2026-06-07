@@ -46,7 +46,28 @@ async fn main() -> Result<()> {
             file,
             output_id,
             view,
+            jq,
         } => {
+            if let Some(path_expr) = jq.as_ref() {
+                let content = if let Some(path) = file {
+                    let (_validated, content) = paths::validate_and_read_file(&path)?;
+                    content
+                } else if let Some(output_id) = output_id {
+                    let store = Store::new()?;
+                    if let Some(output) = store.get_output(&output_id).await? {
+                        output.stdout
+                    } else {
+                        anyhow::bail!("Unknown output_id: {}", output_id);
+                    }
+                } else {
+                    anyhow::bail!("--jq requires --file or --output-id");
+                };
+                let extracted = reshell::compact::jq::extract_json_path(&content, path_expr)
+                    .map_err(|e| anyhow::anyhow!("jq extraction failed: {}", e))?;
+                println!("{}", extracted);
+                return Ok(());
+            }
+
             let store = Store::new()?;
             let view = CompactView::parse(&view);
 

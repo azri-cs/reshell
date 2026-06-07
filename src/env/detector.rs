@@ -194,7 +194,7 @@ fn extract_version(raw: &str) -> String {
     let version = raw
         .trim()
         .trim_start_matches(|c: char| !c.is_ascii_digit() && c != 'v' && c != 'V')
-        .trim_start_matches(|c: char| c == 'v' || c == 'V')
+        .trim_start_matches(['v', 'V'])
         .split_whitespace()
         .next()
         .unwrap_or("")

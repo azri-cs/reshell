@@ -53,13 +53,14 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "rsh_compact",
-            "description": "Retrieve a compacted view of a previously stored large output. Use when rsh_exec returns truncated=true or when inspecting previous command outputs. Views: 'skeleton' (structural summary — function defs, error/warn lines, class/struct defs), 'diff' (only new lines since previous read), 'errors_only' (only ERROR/WARN/FATAL lines), 'full' (complete output).",
+            "description": "Retrieve a compacted view of a previously stored large output. Use when rsh_exec returns truncated=true or when inspecting previous command outputs. Views: 'skeleton' (structural summary — function defs, error/warn lines, class/struct defs), 'diff' (only new lines since previous read), 'errors_only' (only ERROR/WARN/FATAL lines), 'full' (complete output). Use 'path' for jq-like JSON extraction (e.g., '.items[0].name').",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "output_id": { "type": "string", "description": "The output_id from a previous rsh_exec response" },
                     "file": { "type": "string", "description": "Path to a file to compact (must be within working directory)" },
-                    "view": { "type": "string", "enum": ["full", "skeleton", "diff", "errors_only"], "default": "skeleton", "description": "Compaction view to apply" }
+                    "view": { "type": "string", "enum": ["full", "skeleton", "diff", "errors_only"], "default": "skeleton", "description": "Compaction view to apply" },
+                    "path": { "type": "string", "description": "Optional jq-like JSON path to extract (e.g., '.items[0].name')" }
                 }
             }
         }),
@@ -336,6 +337,53 @@ pub(crate) async fn handle_tool_call(
                 s.store.clone()
             };
             let view = CompactView::parse(req.view.as_deref().unwrap_or("skeleton"));
+
+            if let Some(ref jq_path) = req.path {
+                let content = if let Some(ref file_path) = req.file {
+                    match paths::validate_and_read_file(file_path) {
+                        Ok((_path, c)) => c,
+                        Err(e) => {
+                            return (
+                                json!({ "error": format!("File access failed: {}", e) }),
+                                true,
+                            );
+                        }
+                    }
+                } else if let Some(ref output_id) = req.output_id {
+                    match store.get_output(output_id).await {
+                        Ok(Some(output)) => output.stdout,
+                        Ok(None) => {
+                            return (
+                                json!({ "error": format!("Unknown output_id: {}", output_id) }),
+                                true,
+                            );
+                        }
+                        Err(e) => {
+                            return (
+                                json!({ "error": format!("Failed to fetch output: {}", e) }),
+                                true,
+                            );
+                        }
+                    }
+                } else {
+                    return (
+                        json!({ "error": "path requires file or output_id to read from" }),
+                        true,
+                    );
+                };
+                match crate::compact::jq::extract_json_path(&content, jq_path) {
+                    Ok(extracted) => {
+                        return (json!({ "status": "success", "extracted": extracted }), false);
+                    }
+                    Err(e) => {
+                        return (
+                            json!({ "error": format!("jq extraction failed: {}", e) }),
+                            true,
+                        );
+                    }
+                }
+            }
+
             if let Some(file_path) = req.file {
                 match paths::validate_and_read_file(&file_path) {
                     Ok((_path, content)) => {
@@ -542,6 +590,7 @@ struct CompactRequest {
     file: Option<String>,
     #[serde(rename = "view")]
     view: Option<String>,
+    path: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

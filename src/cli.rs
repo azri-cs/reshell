@@ -37,6 +37,8 @@ pub enum Commands {
         output_id: Option<String>,
         #[arg(short, long, default_value = "skeleton")]
         view: String,
+        #[arg(long)]
+        jq: Option<String>,
     },
 }
 
