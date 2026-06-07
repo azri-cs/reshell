@@ -10,10 +10,23 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
 
     match args.command {
-        Commands::Mcp => {
-            let server = reshell::mcp::McpServer::new()?;
-            server.run().await?;
-        }
+        Commands::Mcp { transport, port } => match transport.as_str() {
+            "stdio" => {
+                let server = reshell::mcp::McpServer::new()?;
+                server.run().await?;
+            }
+            "sse" => {
+                use std::net::SocketAddr;
+                let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+                let sse_server = reshell::mcp::sse::SseServer::start(addr).await?;
+                eprintln!(
+                    "SSE MCP server listening on http://{}",
+                    sse_server.local_addr()
+                );
+                std::future::pending::<()>().await;
+            }
+            _ => anyhow::bail!("Unknown transport: {}. Use 'stdio' or 'sse'.", transport),
+        },
         Commands::Exec {
             command,
             cwd,
@@ -41,6 +54,9 @@ async fn main() -> Result<()> {
         Commands::Env => {
             let detector = reshell::env::Detector::cached().await;
             println!("{}", serde_json::to_string_pretty(&detector)?);
+        }
+        Commands::Completions { shell } => {
+            reshell::completions::generate_completions(shell);
         }
         Commands::Compact {
             file,

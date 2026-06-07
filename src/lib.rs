@@ -1,5 +1,6 @@
 pub mod classify;
 pub mod cli;
+pub mod completions;
 pub mod compact;
 pub mod config;
 pub mod env;

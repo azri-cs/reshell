@@ -10,8 +10,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Run as an MCP server over stdio
-    Mcp,
+    /// Run as an MCP server
+    Mcp {
+        /// Transport mode: stdio (default) or sse
+        #[arg(long, default_value = "stdio")]
+        transport: String,
+
+        /// Port for SSE transport (default: 3000)
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+    },
     /// Execute a command directly (CLI mode)
     Exec {
         #[arg(short = 'c', long)]
@@ -29,6 +37,12 @@ pub enum Commands {
     },
     /// Detect and describe the current shell environment
     Env,
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell: bash, zsh, fish, elvish, or powershell
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Compact a file or previous output
     Compact {
         #[arg(short, long)]
