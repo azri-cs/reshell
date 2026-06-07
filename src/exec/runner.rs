@@ -4,6 +4,7 @@ use crate::classify::{classify, taxonomy::RecoveryCode};
 use crate::compact;
 use crate::config::ReshellConfig;
 use crate::env::Detector;
+use crate::memory::metrics::Metrics;
 use crate::memory::pattern::Pattern;
 use crate::memory::Store;
 use crate::recover::resolve::{resolve_suggestion, STDERR_PATTERN_MAX_BYTES};
@@ -13,6 +14,8 @@ use crate::sandbox::scrubber;
 use crate::utils::{hash_command, normalize_command, shell_quote, truncate_utf8};
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
@@ -76,6 +79,7 @@ pub struct Runner {
     store: Store,
     config: ReshellConfig,
     sandbox: Option<OverlaySandbox>,
+    metrics: Arc<Metrics>,
 }
 
 /// Returns true for commands that are trivially simple (no pipes, redirects,
@@ -97,26 +101,57 @@ fn is_simple_command(command: &str) -> bool {
 impl Runner {
     pub fn new() -> anyhow::Result<Self> {
         let store = Store::new()?;
-        Ok(Self { store, config: ReshellConfig::default(), sandbox: None })
+        Ok(Self {
+            store,
+            config: ReshellConfig::default(),
+            sandbox: None,
+            metrics: Arc::new(Metrics::new()),
+        })
     }
 
     pub fn new_with_sandbox() -> anyhow::Result<Self> {
         let store = Store::new()?;
-        Ok(Self { store, config: ReshellConfig::default(), sandbox: Some(OverlaySandbox::new()?) })
+        Ok(Self {
+            store,
+            config: ReshellConfig::default(),
+            sandbox: Some(OverlaySandbox::new()?),
+            metrics: Arc::new(Metrics::new()),
+        })
     }
 
     pub fn new_with_config(config: ReshellConfig) -> anyhow::Result<Self> {
         let store = Store::new()?;
-        Ok(Self { store, config, sandbox: None })
+        Ok(Self {
+            store,
+            config,
+            sandbox: None,
+            metrics: Arc::new(Metrics::new()),
+        })
     }
 
     pub fn with_store(store: Store) -> Self {
-        Self { store, config: ReshellConfig::default(), sandbox: None }
+        Self {
+            store,
+            config: ReshellConfig::default(),
+            sandbox: None,
+            metrics: Arc::new(Metrics::new()),
+        }
+    }
+
+    pub fn with_store_and_metrics(store: Store, metrics: Arc<Metrics>) -> Self {
+        Self {
+            store,
+            config: ReshellConfig::default(),
+            sandbox: None,
+            metrics,
+        }
     }
 
     pub async fn run(&self, req: &ExecRequest) -> anyhow::Result<ExecResult> {
         let execution_id = uuid::Uuid::new_v4().to_string();
         let mut persistence_warnings: Vec<String> = Vec::new();
+
+        self.metrics.record_exec();
 
         // 1. Validate
         if let Err(e) = validator::validate(&req.command) {
@@ -209,6 +244,9 @@ impl Runner {
                 .code
                     == RecoveryCode::R25
             };
+            if should_retry {
+                self.metrics.record_auto_retry_r25();
+            }
             last_attempt = Some(attempt);
             if !should_retry {
                 break;
@@ -247,6 +285,10 @@ impl Runner {
             &detector.shell,
             Some(&self.config),
         );
+
+        if classification.code != RecoveryCode::R10 {
+            self.metrics.record_failure();
+        }
 
         // Fast path: for simple successful commands, skip DB persistence,
         // compaction, and recovery suggestion (nothing to learn from
@@ -293,15 +335,19 @@ impl Runner {
 
         // 5. Compact output
         let compacted = compact::compact(&scrubbed_stdout, None);
+        let raw_len = scrubbed_stdout.len() as u64;
         let final_stdout = if compacted.compacted {
             compacted.content
         } else {
             scrubbed_stdout
         };
+        let compacted_len = final_stdout.len() as u64;
+        self.metrics.record_output_savings(raw_len, compacted_len);
 
         // 6. Recovery suggestion (learned pattern when confident, else heuristics)
         let normalized_command = normalize_command(&req.command);
         let stderr_for_recover = truncate_utf8(&normalized_stderr, STDERR_PATTERN_MAX_BYTES);
+        let recovery_start = Instant::now();
         let resolved = resolve_suggestion(
             &self.store,
             classification.code,
@@ -311,6 +357,9 @@ impl Runner {
             &detector,
         )
         .await?;
+        let recovery_ms = recovery_start.elapsed().as_millis() as u64;
+        let recovery_success = resolved.matched_pattern_row;
+        self.metrics.record_recovery(recovery_ms, recovery_success);
         let suggestion = resolved.suggestion;
 
         // 7. Persist output
@@ -372,12 +421,12 @@ impl Runner {
         // execute the fix command inline (via execute_once, avoiding recursive run()).
         let auto_retry_result = if classification.code == RecoveryCode::R22
             && suggestion.confidence == "high"
-            && suggestion.command.is_some()
             && req.retry
         {
-            let fix_cmd = suggestion.command.as_ref().unwrap();
-            if fix_cmd != &req.command {
-                let fix_req = ExecRequest {
+            if let Some(ref fix_cmd) = suggestion.command {
+                if fix_cmd != &req.command {
+                    self.metrics.record_auto_retry_r22();
+                    let fix_req = ExecRequest {
                     command: fix_cmd.clone(),
                     cwd: req.cwd.clone(),
                     timeout: req.timeout.min(60), // cap at 60s for auto-retry
@@ -422,6 +471,9 @@ impl Runner {
                     }
                     Err(_) => None,
                 }
+            } else {
+                None
+            }
             } else {
                 None
             }

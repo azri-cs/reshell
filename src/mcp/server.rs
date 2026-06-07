@@ -4,6 +4,7 @@ use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use super::tools::list_tools;
+use crate::memory::metrics::Metrics;
 use crate::memory::Store;
 
 /// Maximum allowed size for a single incoming JSON-RPC message body (1 MB).
@@ -19,6 +20,7 @@ pub struct McpServer {
 pub(crate) struct ServerState {
     #[allow(dead_code)]
     pub store: Store,
+    pub metrics: Arc<Metrics>,
 }
 
 impl McpServer {
@@ -28,7 +30,10 @@ impl McpServer {
         crate::config::suppress_stderr_warnings();
         let store = Store::new()?;
         Ok(Self {
-            state: Arc::new(Mutex::new(ServerState { store })),
+            state: Arc::new(Mutex::new(ServerState {
+                store,
+                metrics: Arc::new(Metrics::new()),
+            })),
         })
     }
 

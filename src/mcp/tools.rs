@@ -144,11 +144,11 @@ pub(crate) async fn handle_tool_call(
                 env: wrapper.env.unwrap_or_default(),
                 retry: wrapper.retry.unwrap_or(true),
             };
-            let store = {
+            let (store, metrics) = {
                 let s = state.lock().await;
-                s.store.clone()
+                (s.store.clone(), s.metrics.clone())
             };
-            let runner = Runner::with_store(store);
+            let runner = Runner::with_store_and_metrics(store, metrics);
             match runner.run(&req).await {
                 Ok(result) => {
                     let is_error = result.status == "failed";
@@ -432,10 +432,11 @@ pub(crate) async fn handle_tool_call(
             }
         }
         "rsh_stats" => {
-            let store = {
+            let (store, metrics) = {
                 let s = state.lock().await;
-                s.store.clone()
+                (s.store.clone(), s.metrics.clone())
             };
+            let snapshot = metrics.snapshot();
             let recovery_counts = store.recovery_attempt_counts().await.unwrap_or_default();
             let pattern_fixes = store.patterns_with_fixes_count().await.unwrap_or(0);
             let avg_success = store.average_fix_success_rate().await.unwrap_or(0.0);
@@ -443,6 +444,16 @@ pub(crate) async fn handle_tool_call(
             let total_patterns = store.pattern_count().await.unwrap_or(0);
 
             let stats = json!({
+                "metrics": {
+                    "total_executions": snapshot.total_execs,
+                    "total_failures": snapshot.total_failures,
+                    "recovery_rate": format!("{:.1}%", snapshot.recovery_rate * 100.0),
+                    "false_positive_rate": format!("{:.1}%", snapshot.false_positive_rate * 100.0),
+                    "context_savings": format!("{:.1}%", snapshot.context_savings_pct),
+                    "avg_recovery_time_ms": snapshot.avg_recovery_time_ms as u64,
+                    "auto_retries_r22": snapshot.auto_retries_r22,
+                    "auto_retries_r25": snapshot.auto_retries_r25,
+                },
                 "patterns": {
                     "total": total_patterns,
                     "with_fixes": pattern_fixes,
