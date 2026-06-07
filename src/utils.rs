@@ -3,13 +3,44 @@ pub fn hash_command(command: &str) -> String {
     format!("{:016x}", hash)
 }
 
-pub fn is_binary(data: &[u8]) -> bool {
-    if data.is_empty() {
-        return false;
+/// Detect if content is binary using MIME-type inference.
+/// Falls back to null-byte check if inference is inconclusive.
+/// Returns (is_binary, optional_mime_type).
+pub fn detect_binary(content: &[u8]) -> (bool, Option<String>) {
+    if content.is_empty() {
+        return (false, None);
     }
-    // Check for null bytes in first 8KB
-    let check_len = std::cmp::min(data.len(), 8192);
-    data[..check_len].contains(&0)
+
+    // Check using magic bytes first
+    if let Some(kind) = infer::get(content) {
+        let mime = kind.mime_type();
+        let text_types = [
+            "text/",
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/x-sh",
+            "application/x-shellscript",
+        ];
+        let is_text = text_types.iter().any(|t| mime.starts_with(t));
+        if !is_text {
+            return (true, Some(mime.to_string()));
+        }
+        return (false, Some(mime.to_string()));
+    }
+
+    // Fall back to null-byte check
+    let check_len = std::cmp::min(content.len(), 8192);
+    if content[..check_len].contains(&0) {
+        return (true, None);
+    }
+
+    (false, None)
+}
+
+/// Quick null-byte check (existing behavior, kept for fast path).
+pub fn is_binary(content: &[u8]) -> bool {
+    detect_binary(content).0
 }
 
 pub fn normalize_command(command: &str) -> String {
@@ -49,6 +80,21 @@ mod tests {
         let h1 = hash_command("echo hello");
         let h2 = hash_command("echo world");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn detects_png_as_binary() {
+        let png: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let (is_bin, mime) = detect_binary(&png);
+        assert!(is_bin);
+        assert_eq!(mime.unwrap(), "image/png");
+    }
+
+    #[test]
+    fn detects_json_as_text() {
+        let json = b"{\"key\": \"value\"}";
+        let (is_bin, _) = detect_binary(json);
+        assert!(!is_bin);
     }
 
     #[test]

@@ -40,6 +40,7 @@ once_cell = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 toml = "0.8"
+infer = "0.15"
 
 # Linux-only seccomp sandbox
 [target.'cfg(target_os = "linux")'.dependencies]

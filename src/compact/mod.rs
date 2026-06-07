@@ -4,7 +4,7 @@ pub mod languages;
 pub mod skeleton;
 pub mod view;
 
-use crate::utils::is_binary;
+use crate::utils::detect_binary;
 use serde::{Deserialize, Serialize};
 
 fn max_output_lines() -> usize {
@@ -24,10 +24,14 @@ pub struct CompactResult {
 
 pub fn compact(output: &str, previous_hash: Option<&str>) -> CompactResult {
     // Binary detection
-    if is_binary(output.as_bytes()) {
+    let (binary, mime) = detect_binary(output.as_bytes());
+    if binary {
         return CompactResult {
             compacted: true,
-            content: "[Binary output detected and omitted]".to_string(),
+            content: format!(
+                "[Binary output detected{} and omitted]",
+                mime.map(|m| format!(": {}", m)).unwrap_or_default()
+            ),
             skeleton: String::new(),
             is_binary: true,
         };
