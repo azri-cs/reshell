@@ -644,3 +644,23 @@ async fn test_mcp_prompts_list_and_get() {
 
     let _ = child.kill().await;
 }
+
+#[test]
+fn test_cli_version_flag() {
+    let output = std::process::Command::new(rsh_bin())
+        .arg("--version")
+        .output()
+        .expect("failed to execute rsh");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rsh"),
+        "version output should contain 'rsh': {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "should contain version: {}",
+        stdout
+    );
+}
