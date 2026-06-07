@@ -1,0 +1,8 @@
+target/
+.git/
+tests/fixtures/
+benches/
+fuzz/
+docs/
+*.md
+!README.md
