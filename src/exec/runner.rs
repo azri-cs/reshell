@@ -7,6 +7,7 @@ use crate::env::Detector;
 use crate::memory::pattern::Pattern;
 use crate::memory::Store;
 use crate::recover::resolve::{resolve_suggestion, STDERR_PATTERN_MAX_BYTES};
+use crate::sandbox::overlay::OverlaySandbox;
 use crate::sandbox::paths;
 use crate::sandbox::scrubber;
 use crate::utils::{hash_command, normalize_command, shell_quote, truncate_utf8};
@@ -74,6 +75,7 @@ static BLOCKED_ENV_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
 pub struct Runner {
     store: Store,
     config: ReshellConfig,
+    sandbox: Option<OverlaySandbox>,
 }
 
 /// Returns true for commands that are trivially simple (no pipes, redirects,
@@ -95,16 +97,21 @@ fn is_simple_command(command: &str) -> bool {
 impl Runner {
     pub fn new() -> anyhow::Result<Self> {
         let store = Store::new()?;
-        Ok(Self { store, config: ReshellConfig::default() })
+        Ok(Self { store, config: ReshellConfig::default(), sandbox: None })
+    }
+
+    pub fn new_with_sandbox() -> anyhow::Result<Self> {
+        let store = Store::new()?;
+        Ok(Self { store, config: ReshellConfig::default(), sandbox: Some(OverlaySandbox::new()?) })
     }
 
     pub fn new_with_config(config: ReshellConfig) -> anyhow::Result<Self> {
         let store = Store::new()?;
-        Ok(Self { store, config })
+        Ok(Self { store, config, sandbox: None })
     }
 
     pub fn with_store(store: Store) -> Self {
-        Self { store, config: ReshellConfig::default() }
+        Self { store, config: ReshellConfig::default(), sandbox: None }
     }
 
     pub async fn run(&self, req: &ExecRequest) -> anyhow::Result<ExecResult> {
@@ -177,7 +184,16 @@ impl Runner {
             } else {
                 retry_request.as_ref().unwrap_or(req)
             };
-            let attempt = self.execute_once(current_req, current_shell).await?;
+            let attempt = if let Some(ref sandbox) = self.sandbox {
+                let req_clone = current_req.clone();
+                let shell_owned = current_shell.to_string();
+                sandbox.run(move || {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(self.execute_once(&req_clone, &shell_owned))
+                })?
+            } else {
+                self.execute_once(current_req, current_shell).await?
+            };
             // Quick check: only classify enough to decide if retry is needed.
             // Full classification happens once after the loop on scrubbed output.
             let should_retry = req.retry && attempt_idx == 0 && retry_shell.is_some() && {

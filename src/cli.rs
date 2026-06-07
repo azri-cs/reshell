@@ -24,6 +24,8 @@ pub enum Commands {
         retry: bool,
         #[arg(short = 'E', long, value_parser = parse_key_val)]
         env: Vec<(String, String)>,
+        #[arg(long, default_value_t = false)]
+        sandbox: bool,
     },
     /// Detect and describe the current shell environment
     Env,

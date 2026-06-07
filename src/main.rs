@@ -20,8 +20,13 @@ async fn main() -> Result<()> {
             timeout,
             retry,
             env,
+            sandbox,
         } => {
-            let runner = reshell::exec::runner::Runner::new()?;
+            let runner = if sandbox {
+                reshell::exec::runner::Runner::new_with_sandbox()?
+            } else {
+                reshell::exec::runner::Runner::new()?
+            };
             let result = runner
                 .run(&reshell::exec::ExecRequest {
                     command,
