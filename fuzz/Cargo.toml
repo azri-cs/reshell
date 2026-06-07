@@ -1,0 +1,32 @@
+[package]
+name = "reshell-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.reshell]
+path = ".."
+
+[[bin]]
+name = "validator_fuzz"
+path = "fuzz_targets/validator_fuzz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "classifier_fuzz"
+path = "fuzz_targets/classifier_fuzz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "scrubber_fuzz"
+path = "fuzz_targets/scrubber_fuzz.rs"
+test = false
+doc = false
