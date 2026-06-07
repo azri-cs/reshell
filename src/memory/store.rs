@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 /// Cap stored command outputs to limit database growth (oldest rows pruned after insert).
 const MAX_STORED_OUTPUT_ROWS: usize = 5000;
 
+/// Maximum number of patterns before LRU eviction triggers.
+const MAX_PATTERNS: usize = 1000;
+
 #[derive(Clone)]
 pub struct Store {
     /// SQLite connection, wrapped in Arc+Mutex for thread-safe sharing
@@ -202,6 +205,7 @@ impl Store {
                     pattern.platform_tag.as_deref().unwrap_or("unknown"),
                 ],
             )?;
+            evict_if_needed(conn)?;
             Ok(())
         })
         .await
@@ -688,6 +692,21 @@ impl Store {
     }
 }
 
+/// Evict the oldest patterns when count exceeds MAX_PATTERNS.
+fn evict_if_needed(conn: &Connection) -> anyhow::Result<()> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))?;
+    if count as usize > MAX_PATTERNS {
+        let excess = count as usize - MAX_PATTERNS;
+        conn.execute(
+            "DELETE FROM patterns WHERE id IN (
+                SELECT id FROM patterns ORDER BY last_used ASC LIMIT ?1
+            )",
+            rusqlite::params![excess as i64],
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredOutput {
     pub output_id: String,
@@ -895,5 +914,44 @@ mod tests {
         store.save_pattern(&pattern).await.unwrap();
         // Should still be 1 pattern (upsert), but usage_count incremented
         assert_eq!(store.pattern_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn patterns_evicted_by_lru() -> anyhow::Result<()> {
+        use crate::classify::taxonomy::RecoveryCode;
+        let temp = tempdir()?;
+        let store = Store::new_at_path(temp.path().join("test_lru.db"))?;
+
+        // Insert 1100 patterns (default limit is 1000)
+        for i in 0..1100 {
+            store
+                .save_pattern(&Pattern {
+                    id: None,
+                    command_hash: format!("hash_{}", i),
+                    command_template: format!("cmd_{}", i),
+                    recovery_code: RecoveryCode::R22.to_string(),
+                    stderr_pattern: format!("stderr_{}", i),
+                    fix_command: None,
+                    fix_success_rate: 0.0,
+                    last_used: Some(chrono::Utc::now()),
+                    usage_count: 1,
+                    platform_tag: Some("linux".to_string()),
+                })
+                .await?;
+        }
+
+        // Only 1000 should remain
+        let count = store.pattern_count().await?;
+        assert!(count <= 1000, "expected <=1000 patterns, got {}", count);
+
+        // The oldest patterns (cmd_0..cmd_99) should be evicted
+        let oldest = store.find_pattern_exact("cmd_0", "stderr_0").await?;
+        assert!(oldest.is_none(), "oldest pattern should be evicted");
+
+        // Newer patterns should still exist
+        let newer = store.find_pattern_exact("cmd_500", "stderr_500").await?;
+        assert!(newer.is_some(), "newer pattern should survive");
+
+        Ok(())
     }
 }
