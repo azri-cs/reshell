@@ -20,7 +20,7 @@ fn bench_recover_r22(c: &mut Criterion) {
                 black_box(Some("gh: command not found")),
                 &detector,
             ));
-            black_box(suggestion);
+            let _ = black_box(suggestion);
         })
     });
 }
@@ -41,7 +41,7 @@ fn bench_recover_r21_permission(c: &mut Criterion) {
                 black_box(Some("Permission denied")),
                 &detector,
             ));
-            black_box(suggestion);
+            let _ = black_box(suggestion);
         })
     });
 }
@@ -62,10 +62,15 @@ fn bench_recover_r25_bashism(c: &mut Criterion) {
                 black_box(Some("[[ not found")),
                 &detector,
             ));
-            black_box(suggestion);
+            let _ = black_box(suggestion);
         })
     });
 }
 
-criterion_group!(benches, bench_recover_r22, bench_recover_r21_permission, bench_recover_r25_bashism);
+criterion_group!(
+    benches,
+    bench_recover_r22,
+    bench_recover_r21_permission,
+    bench_recover_r25_bashism
+);
 criterion_main!(benches);

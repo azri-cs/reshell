@@ -20,7 +20,7 @@ fn bench_exec_simple(c: &mut Criterion) {
                 retry: false,
             };
             let result = rt.block_on(runner.run(black_box(&request)));
-            black_box(result);
+            let _ = black_box(result);
         })
     });
 }

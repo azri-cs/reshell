@@ -4,7 +4,8 @@ use reshell::classify;
 fn bench_classify_success(c: &mut Criterion) {
     c.bench_function("classify_R10", |b| {
         b.iter(|| {
-            let result = classify::classify(0, black_box(""), black_box(""), false, black_box(""), None);
+            let result =
+                classify::classify(0, black_box(""), black_box(""), false, black_box(""), None);
             black_box(result);
         })
     });
