@@ -5,6 +5,11 @@ edition = "2021"
 description = "Resilient Shell Execution Middleware for AI Agents"
 authors = ["Azri Adam <azriadam.cs@gmail.com>"]
 license = "MIT"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["shell", "mcp", "ai", "agent", "middleware", "resilience"]
+repository = "https://github.com/azri-cs/reshell"
+documentation = "https://github.com/azri-cs/reshell"
+readme = "README.md"
 
 [[bin]]
 name = "rsh"
