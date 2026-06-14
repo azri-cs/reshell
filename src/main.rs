@@ -37,15 +37,11 @@ async fn main() -> Result<()> {
             timeout,
             retry,
             env,
-            sandbox,
+            sandbox: _,
         } => {
             let cwd_path = cwd.as_deref().map(std::path::Path::new);
             let store = reshell::memory::Store::new_for_cwd(cwd_path)?;
-            let runner = if sandbox {
-                reshell::exec::runner::Runner::with_store(store)
-            } else {
-                reshell::exec::runner::Runner::with_store(store)
-            };
+            let runner = reshell::exec::runner::Runner::with_store(store);
             let result = runner
                 .run(&reshell::exec::ExecRequest {
                     command,

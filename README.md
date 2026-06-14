@@ -29,6 +29,29 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
+### Prebuilt binaries
+
+Download the latest release for your platform from the [GitHub Releases](https://github.com/azri-cs/reshell/releases) page:
+
+```bash
+# Linux (x86_64)
+curl -L -o rsh.tar.gz https://github.com/azri-cs/reshell/releases/latest/download/rsh-x86_64-unknown-linux-musl.tar.gz
+tar xzf rsh.tar.gz
+sudo mv rsh /usr/local/bin/
+
+# macOS (Apple Silicon)
+curl -L -o rsh.tar.gz https://github.com/azri-cs/reshell/releases/latest/download/rsh-aarch64-apple-darwin.tar.gz
+tar xzf rsh.tar.gz
+sudo mv rsh /usr/local/bin/
+```
+
+### Homebrew
+
+```bash
+brew tap azri-cs/reshell
+brew install reshell
+```
+
 ### From Source (requires Rust toolchain)
 
 ```bash
