@@ -1,6 +1,7 @@
 pub mod diff;
-pub mod jq;
 pub mod json;
+pub mod jsonpath;
+pub mod jq;
 pub mod languages;
 pub mod skeleton;
 pub mod view;
