@@ -9,6 +9,7 @@ use crate::env::Detector;
 use crate::exec::{runner::Runner, ExecRequest};
 use crate::recover::resolve::resolve_suggestion;
 use crate::sandbox::paths;
+use crate::memory::Store;
 
 use super::router::ServerState;
 
@@ -145,9 +146,19 @@ pub(crate) async fn handle_tool_call(
                 env: wrapper.env.unwrap_or_default(),
                 retry: wrapper.retry.unwrap_or(true),
             };
-            let (store, metrics) = {
+            let metrics = {
                 let s = state.lock().await;
-                (s.store.clone(), s.metrics.clone())
+                s.metrics.clone()
+            };
+            let cwd_path = req.cwd.as_deref().map(std::path::Path::new);
+            let store = match Store::new_for_cwd(cwd_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        json!({ "error": format!("Failed to open pattern store: {}", e) }),
+                        true,
+                    );
+                }
             };
             let runner = Runner::with_store_and_metrics(store, metrics);
             match runner.run(&req).await {

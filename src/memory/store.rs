@@ -1,7 +1,7 @@
 use super::pattern::{current_platform_tag, Pattern};
 use chrono::Utc;
 use rusqlite::{params, Connection};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Cap stored command outputs to limit database growth (oldest rows pruned after insert).
@@ -19,16 +19,38 @@ pub struct Store {
 }
 
 impl Store {
+    /// Resolve the pattern database path using, in order:
+    /// 1. `RSH_PATTERN_DB` environment variable.
+    /// 2. `.reshell/patterns.db` inside `cwd` if provided.
+    /// 3. `~/.reshell/patterns.db`.
     pub fn new() -> anyhow::Result<Self> {
-        let path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".reshell")
-            .join("patterns.db");
+        Self::new_for_cwd(None::<&Path>)
+    }
+
+    pub fn new_for_cwd(cwd: Option<&Path>) -> anyhow::Result<Self> {
+        let path = if let Ok(env_path) = std::env::var("RSH_PATTERN_DB") {
+            PathBuf::from(env_path)
+        } else if let Some(cwd) = cwd {
+            let project_db = cwd.join(".reshell").join("patterns.db");
+            if project_db.exists() {
+                project_db
+            } else {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".reshell")
+                    .join("patterns.db")
+            }
+        } else {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".reshell")
+                .join("patterns.db")
+        };
         Self::new_at_path(path)
     }
 
     pub fn new_at_path(path: PathBuf) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
         let conn = Connection::open(&path)?;
         // Performance: WAL mode for concurrent reads, synchronous=NORMAL for speed
         conn.execute_batch(
@@ -645,6 +667,69 @@ impl Store {
         .await
     }
 
+    /// Merge patterns from another store into this one.
+    /// Upserts by `(command_template, stderr_pattern)` and preserves the
+    /// higher `fix_success_rate` of the two sources.
+    pub async fn merge_from(&self, source: &Store) -> anyhow::Result<usize> {
+        let source_conn = Arc::clone(&source.conn);
+        let target_conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let source_guard = source_conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let target_guard = target_conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            let mut stmt = source_guard.prepare_cached(
+                "SELECT command_hash, command_template, recovery_code, stderr_pattern,
+                        fix_command, fix_success_rate, last_used, usage_count, platform_tag
+                 FROM patterns",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut merged = 0;
+            while let Some(row) = rows.next()? {
+                let command_hash: String = row.get(0)?;
+                let command_template: String = row.get(1)?;
+                let recovery_code: String = row.get(2)?;
+                let stderr_pattern: String = row.get(3)?;
+                let fix_command: Option<String> = row.get(4)?;
+                let fix_success_rate: f64 = row.get(5)?;
+                let last_used: String = row.get(6)?;
+                let usage_count: i64 = row.get(7)?;
+                let platform_tag: String = row.get(8)?;
+
+                target_guard.execute(
+                    "INSERT INTO patterns (command_hash, command_template, recovery_code, stderr_pattern,
+                                           fix_command, fix_success_rate, last_used, usage_count, platform_tag)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(command_template, stderr_pattern) DO UPDATE SET
+                         command_hash = excluded.command_hash,
+                         recovery_code = excluded.recovery_code,
+                         fix_command = COALESCE(excluded.fix_command, patterns.fix_command),
+                         fix_success_rate = MAX(excluded.fix_success_rate, patterns.fix_success_rate),
+                         last_used = CASE
+                             WHEN excluded.last_used > patterns.last_used THEN excluded.last_used
+                             ELSE patterns.last_used
+                         END,
+                         usage_count = patterns.usage_count + excluded.usage_count,
+                         platform_tag = excluded.platform_tag",
+                    params![
+                        command_hash,
+                        command_template,
+                        recovery_code,
+                        stderr_pattern,
+                        fix_command,
+                        fix_success_rate,
+                        last_used,
+                        usage_count,
+                        platform_tag,
+                    ],
+                )?;
+                merged += 1;
+            }
+            Ok(merged)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("merge task join: {}", e))?
+    }
+
     /// Get recent audit log entries.
     pub async fn recent_audit_entries(&self, limit: i64) -> anyhow::Result<Vec<AuditEntry>> {
         self.run_db(move |conn| {
@@ -914,6 +999,65 @@ mod tests {
         store.save_pattern(&pattern).await.unwrap();
         // Should still be 1 pattern (upsert), but usage_count incremented
         assert_eq!(store.pattern_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn project_local_db_resolution() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let project_dir = temp.path().join("myproject");
+        std::fs::create_dir_all(project_dir.join(".reshell"))?;
+        let project_db = project_dir.join(".reshell").join("patterns.db");
+
+        // Create the project-local DB by path first.
+        let _project_store = Store::new_at_path(project_db.clone())?;
+
+        // new_for_cwd should resolve to the project DB when it exists.
+        let resolved = Store::new_for_cwd(Some(&project_dir))?;
+        let count = resolved.pattern_count().await?;
+        assert_eq!(count, 0);
+
+        // A different cwd should fall back to global.
+        let other_dir = temp.path().join("other");
+        std::fs::create_dir_all(&other_dir)?;
+        let global_fallback = Store::new_for_cwd(Some(&other_dir))?;
+        let _ = global_fallback.pattern_count().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_from_copies_patterns() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let source_db = temp.path().join("source.db");
+        let target_db = temp.path().join("target.db");
+
+        let source = Store::new_at_path(source_db)?;
+        source
+            .save_pattern(&Pattern {
+                id: None,
+                command_hash: "h".to_string(),
+                command_template: "npm test".to_string(),
+                recovery_code: "R24".to_string(),
+                stderr_pattern: "npm ERR!".to_string(),
+                fix_command: Some("npm install".to_string()),
+                fix_success_rate: 0.8,
+                last_used: Some(Utc::now()),
+                usage_count: 5,
+                platform_tag: Some("linux".to_string()),
+            })
+            .await?;
+
+        let target = Store::new_at_path(target_db)?;
+        let merged = target.merge_from(&source).await?;
+        assert_eq!(merged, 1);
+
+        let found = target
+            .find_pattern("npm test", "npm ERR!")
+            .await?
+            .expect("merged pattern should exist");
+        assert_eq!(found.fix_command, Some("npm install".to_string()));
+        assert_eq!(found.fix_success_rate, 0.8);
+        Ok(())
     }
 
     #[tokio::test]

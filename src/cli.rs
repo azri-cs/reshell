@@ -54,6 +54,13 @@ pub enum Commands {
         #[arg(long)]
         jq: Option<String>,
     },
+    /// Merge patterns from one database into another
+    MergePatterns {
+        #[arg(long)]
+        from: std::path::PathBuf,
+        #[arg(long)]
+        into: std::path::PathBuf,
+    },
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {

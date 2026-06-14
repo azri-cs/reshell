@@ -39,10 +39,12 @@ async fn main() -> Result<()> {
             env,
             sandbox,
         } => {
+            let cwd_path = cwd.as_deref().map(std::path::Path::new);
+            let store = reshell::memory::Store::new_for_cwd(cwd_path)?;
             let runner = if sandbox {
-                reshell::exec::runner::Runner::new_with_sandbox()?
+                reshell::exec::runner::Runner::with_store(store)
             } else {
-                reshell::exec::runner::Runner::new()?
+                reshell::exec::runner::Runner::with_store(store)
             };
             let result = runner
                 .run(&reshell::exec::ExecRequest {
@@ -54,6 +56,12 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::MergePatterns { from, into } => {
+            let source = reshell::memory::Store::new_at_path(from)?;
+            let target = reshell::memory::Store::new_at_path(into)?;
+            let merged = target.merge_from(&source).await?;
+            println!("Merged {} patterns", merged);
         }
         Commands::Env => {
             let detector = reshell::env::Detector::cached().await;
