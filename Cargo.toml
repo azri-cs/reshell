@@ -44,7 +44,9 @@ toml = "0.8"
 infer = "0.15"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+http-body = "1"
 http-body-util = "0.1"
+bytes = "1"
 
 # Linux-only seccomp sandbox
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -59,6 +61,8 @@ tokio-test = "0.4"
 insta = { version = "1", features = ["json"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 proptest = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures = "0.3"
 
 [[bench]]
 name = "compaction_bench"

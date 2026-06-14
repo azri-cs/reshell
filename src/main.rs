@@ -17,8 +17,12 @@ async fn main() -> Result<()> {
             }
             "sse" => {
                 use std::net::SocketAddr;
+                use std::sync::Arc;
                 let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-                let sse_server = reshell::mcp::sse::SseServer::start(addr).await?;
+                let store = reshell::memory::Store::new()?;
+                let metrics = Arc::new(reshell::memory::metrics::Metrics::new());
+                let router = Arc::new(reshell::mcp::Router::new(store, metrics));
+                let sse_server = reshell::mcp::sse::SseServer::start(addr, router).await?;
                 eprintln!(
                     "SSE MCP server listening on http://{}",
                     sse_server.local_addr()
