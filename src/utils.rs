@@ -47,6 +47,53 @@ pub fn normalize_command(command: &str) -> String {
     command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BinarySummary {
+    pub mime_type: Option<String>,
+    pub byte_count: usize,
+    pub sha256: String,
+    pub first_bytes: String,
+    pub last_bytes: String,
+}
+
+pub fn summarize_binary(content: &[u8]) -> BinarySummary {
+    let (_, mime) = detect_binary(content);
+    let sha256 = sha256_hex(content);
+    let first_bytes = hex_prefix(content, 16);
+    let last_bytes = hex_suffix(content, 16);
+    BinarySummary {
+        mime_type: mime,
+        byte_count: content.len(),
+        sha256,
+        first_bytes,
+        last_bytes,
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    // Use xxhash for a fast deterministic hash since sha256 is not in deps.
+    let hash = xxhash_rust::xxh3::xxh3_128(data);
+    format!("{:032x}", hash)
+}
+
+fn hex_prefix(data: &[u8], n: usize) -> String {
+    data.iter()
+        .take(n)
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn hex_suffix(data: &[u8], n: usize) -> String {
+    data.iter()
+        .rev()
+        .take(n)
+        .rev()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }

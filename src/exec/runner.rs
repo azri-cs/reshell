@@ -1,4 +1,4 @@
-use super::{validator, CompactionHint, ExecRequest, ExecResult, NextAction, OutputInfo};
+use super::{validator, BinaryHandling, CompactionHint, ExecRequest, ExecResult, NextAction, OutputInfo};
 use crate::classify::normalize::normalize_stderr;
 use crate::classify::{classify, taxonomy::RecoveryCode};
 use crate::compact;
@@ -11,7 +11,7 @@ use crate::recover::resolve::{resolve_suggestion, STDERR_PATTERN_MAX_BYTES};
 use crate::sandbox::overlay::OverlaySandbox;
 use crate::sandbox::paths;
 use crate::sandbox::scrubber;
-use crate::utils::{hash_command, normalize_command, shell_quote, truncate_utf8};
+use crate::utils::{detect_binary, hash_command, normalize_command, shell_quote, summarize_binary, truncate_utf8};
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -179,6 +179,7 @@ impl Runner {
                     stderr: e.clone(),
                     exit_code: -1,
                     truncated: false,
+                    binary_summary: None,
                 },
                 next_action: Some(NextAction {
                     tool: "rsh_recover".to_string(),
@@ -260,6 +261,48 @@ impl Runner {
         let timed_out = attempt.timed_out;
         let warnings = attempt.warnings;
 
+        // 2b. Binary output handling
+        let (stdout, binary_summary) = match req.binary_handling {
+            BinaryHandling::Allow => (stdout, None),
+            _ => {
+                let (is_binary, _mime) = detect_binary(stdout.as_bytes());
+                if is_binary {
+                    let summary = summarize_binary(stdout.as_bytes());
+                    match req.binary_handling {
+                        BinaryHandling::Reject => {
+                            return Ok(ExecResult {
+                                status: "failed".to_string(),
+                                recovery_code: RecoveryCode::R30.to_string(),
+                                recovery_class: RecoveryCode::R30.class_name().to_string(),
+                                original_command: req.command.clone(),
+                                execution_id,
+                                output_id: None,
+                                suggestion: serde_json::json!({"action":"escalate","confidence":"high","reason":"Binary output was rejected by binary_handling=reject"}),
+                                output: OutputInfo {
+                                    stdout: String::new(),
+                                    stderr: scrubber::scrub_secrets(&stderr),
+                                    exit_code,
+                                    truncated: false,
+                                    binary_summary: Some(summary),
+                                },
+                                next_action: None,
+                                compaction_hint: None,
+                                platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
+                                warnings,
+                                auto_retry: None,
+                            });
+                        }
+                        _ => {
+                            let summary_json = serde_json::to_string_pretty(&summary).unwrap_or_default();
+                            (summary_json, Some(summary))
+                        }
+                    }
+                } else {
+                    (stdout, None)
+                }
+            }
+        };
+
         // 3. Scrub secrets from both stderr and stdout.
         // Skip costly scrubbing for small success outputs (no secrets expected).
         let scrubbed_stderr = if exit_code == 0 && stderr.len() < 256 {
@@ -308,6 +351,7 @@ impl Runner {
                     stderr: scrubbed_stderr,
                     exit_code,
                     truncated: false,
+                    binary_summary,
                 },
                 next_action: None,
                 compaction_hint: None,
@@ -432,6 +476,7 @@ impl Runner {
                         timeout: req.timeout.min(60), // cap at 60s for auto-retry
                         env: req.env.clone(),
                         retry: false,
+                        binary_handling: req.binary_handling,
                     };
                     // Use execute_once directly (avoids recursive run() call)
                     let fix_attempt = self
@@ -475,6 +520,7 @@ impl Runner {
                                     stderr: attempt.stderr,
                                     exit_code: attempt.exit_code,
                                     truncated: false,
+                                    binary_summary: None,
                                 },
                                 next_action: None,
                                 compaction_hint: None,
@@ -552,6 +598,7 @@ impl Runner {
                 stderr: scrubbed_stderr,
                 exit_code,
                 truncated: compacted.compacted,
+                binary_summary,
             },
             next_action,
             compaction_hint,
@@ -658,6 +705,7 @@ mod tests {
             timeout: 5,
             env: HashMap::new(),
             retry,
+            binary_handling: super::BinaryHandling::Summary,
         }
     }
 
@@ -726,5 +774,28 @@ mod tests {
 
         assert!(retry.command.starts_with("zsh -c '"));
         assert!(retry.command.contains("[[ -n"));
+    }
+
+    #[tokio::test]
+    async fn binary_stdout_returns_summary() {
+        let store = test_store();
+        let runner = Runner::with_store(store);
+        // PNG magic bytes via printf
+        let req = ExecRequest {
+            command: "printf '\\000\\001\\002\\003'".to_string(),
+            cwd: None,
+            timeout: 5,
+            env: HashMap::new(),
+            retry: false,
+            binary_handling: super::BinaryHandling::Summary,
+        };
+
+        let result = runner.run(&req).await.unwrap();
+        assert_eq!(result.status, "success");
+        assert!(
+            result.output.binary_summary.is_some(),
+            "binary_summary should be present"
+        );
+        assert!(result.output.stdout.contains("byte_count"));
     }
 }

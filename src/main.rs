@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
             retry,
             env,
             sandbox: _,
+            binary_handling,
         } => {
             let cwd_path = cwd.as_deref().map(std::path::Path::new);
             let store = reshell::memory::Store::new_for_cwd(cwd_path)?;
@@ -49,6 +50,7 @@ async fn main() -> Result<()> {
                     timeout,
                     env: env.into_iter().collect(),
                     retry,
+                    binary_handling,
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);

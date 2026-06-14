@@ -145,6 +145,7 @@ pub(crate) async fn handle_tool_call(
                 timeout: wrapper.timeout.unwrap_or(120).min(600),
                 env: wrapper.env.unwrap_or_default(),
                 retry: wrapper.retry.unwrap_or(true),
+                binary_handling: wrapper.binary_handling,
             };
             let metrics = {
                 let s = state.lock().await;
@@ -589,6 +590,8 @@ struct ExecRequestWrapper {
     timeout: Option<u64>,
     env: Option<HashMap<String, String>>,
     retry: Option<bool>,
+    #[serde(default)]
+    binary_handling: crate::exec::BinaryHandling,
 }
 
 #[derive(Debug, serde::Deserialize)]

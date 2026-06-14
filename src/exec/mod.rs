@@ -5,6 +5,18 @@ pub mod validator;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BinaryHandling {
+    /// Return a structured summary (MIME, hash, byte count, first/last bytes).
+    #[default]
+    Summary,
+    /// Reject binary output with an error.
+    Reject,
+    /// Allow raw binary through (legacy behavior, not recommended for MCP).
+    Allow,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRequest {
     pub command: String,
@@ -12,6 +24,8 @@ pub struct ExecRequest {
     pub timeout: u64,
     pub env: HashMap<String, String>,
     pub retry: bool,
+    #[serde(default)]
+    pub binary_handling: BinaryHandling,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,4 +84,6 @@ pub struct OutputInfo {
     pub stderr: String,
     pub exit_code: i32,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub binary_summary: Option<crate::utils::BinarySummary>,
 }

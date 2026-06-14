@@ -34,6 +34,8 @@ pub enum Commands {
         env: Vec<(String, String)>,
         #[arg(long, default_value_t = false)]
         sandbox: bool,
+        #[arg(long, default_value = "summary", value_parser = parse_binary_handling)]
+        binary_handling: crate::exec::BinaryHandling,
     },
     /// Detect and describe the current shell environment
     Env,
@@ -68,4 +70,16 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
         .find('=')
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{}`", s))?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}
+
+fn parse_binary_handling(s: &str) -> Result<crate::exec::BinaryHandling, String> {
+    match s {
+        "summary" => Ok(crate::exec::BinaryHandling::Summary),
+        "reject" => Ok(crate::exec::BinaryHandling::Reject),
+        "allow" => Ok(crate::exec::BinaryHandling::Allow),
+        _ => Err(format!(
+            "invalid binary handling: {} (expected summary, reject, or allow)",
+            s
+        )),
+    }
 }
