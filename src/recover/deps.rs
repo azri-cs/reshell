@@ -10,7 +10,6 @@ use regex::Regex;
 static DEP_PATTERNS: Lazy<Vec<DepPattern>> = Lazy::new(|| {
     vec![
         // npm: "404 'package-name@version' is not in the npm registry"
-        // npm: "ERR! 404 Not Found - GET https://.../package"
         DepPattern {
             tool_name: "npm",
             re: Regex::new(r"npm ERR! 404\s+(?:Not Found\s+)?(?:'([^']+?)'|\S+@)").unwrap(),
@@ -24,7 +23,6 @@ static DEP_PATTERNS: Lazy<Vec<DepPattern>> = Lazy::new(|| {
             capture_group: 1,
             install_template: "pip install {pkg}",
         },
-        // cargo: "error[E0432]: unresolved import `crate_name`"
         // cargo: "could not find `crate_name` in registry"
         DepPattern {
             tool_name: "cargo",
@@ -39,10 +37,10 @@ static DEP_PATTERNS: Lazy<Vec<DepPattern>> = Lazy::new(|| {
             capture_group: 1,
             install_template: "gem install {pkg}",
         },
-        // go: "cannot find package 'github.com/foo/bar'" or "cannot find package \"github.com/foo/bar\""
+        // go: "cannot find package 'github.com/foo/bar'"
         DepPattern {
             tool_name: "go",
-            re: Regex::new(r#"cannot find package ['"]([^'"]+)['"]"#).unwrap(),
+            re: Regex::new(r"cannot find package '([^']+)'").unwrap(),
             capture_group: 1,
             install_template: "go get {pkg}",
         },
@@ -60,13 +58,68 @@ static DEP_PATTERNS: Lazy<Vec<DepPattern>> = Lazy::new(|| {
             capture_group: 1,
             install_template: "sudo apt update && sudo apt install {pkg}",
         },
-        // composer: "Could not find package X" or "Root package ... requires X"
+        // composer: "Could not find package X"
         DepPattern {
             tool_name: "composer",
-            re: Regex::new(r#"(?:Could not find|Root package) .*? requires? ['"]?([^'",]+)['"]?"#)
-                .unwrap(),
+            re: Regex::new(r#"(?:Could not find|Root package) .*? requires? ['"]?([^'",]+)['"]?"#).unwrap(),
             capture_group: 1,
             install_template: "composer require {pkg}",
+        },
+        // pnpm: "ERR_PNPM_NO_PACKAGE_MANIFEST"
+        DepPattern {
+            tool_name: "pnpm",
+            re: Regex::new(r"ERR_PNPM_\w+\s+(\S+)").unwrap(),
+            capture_group: 1,
+            install_template: "pnpm add {pkg}",
+        },
+        // yarn: "error Couldn't find package X"
+        DepPattern {
+            tool_name: "yarn",
+            re: Regex::new(r"Couldn't find package (\S+)").unwrap(),
+            capture_group: 1,
+            install_template: "yarn add {pkg}",
+        },
+        // uv: "error: Package `X` not found"
+        DepPattern {
+            tool_name: "uv",
+            re: Regex::new(r"Package [`']([^`']+)[`'] not found").unwrap(),
+            capture_group: 1,
+            install_template: "uv add {pkg}",
+        },
+        // poetry: "SolverProblemError because X is not found"
+        DepPattern {
+            tool_name: "poetry",
+            re: Regex::new("(?:Package|')([^']+)[']? (?:is )?not found").unwrap(),
+            capture_group: 1,
+            install_template: "poetry add {pkg}",
+        },
+        // gradle: "Could not resolve dependency X"
+        DepPattern {
+            tool_name: "gradle",
+            re: Regex::new(r"Could not resolve dependency\s+(\S+)").unwrap(),
+            capture_group: 1,
+            install_template: "gradle {pkg}",
+        },
+        // maven: "Could not resolve artifact X"
+        DepPattern {
+            tool_name: "mvn",
+            re: Regex::new(r"Could not resolve artifact\s+(\S+)").unwrap(),
+            capture_group: 1,
+            install_template: "mvn install",
+        },
+        // bun: "error: Cannot find package X"
+        DepPattern {
+            tool_name: "bun",
+            re: Regex::new(r"Cannot find package (\S+)").unwrap(),
+            capture_group: 1,
+            install_template: "bun add {pkg}",
+        },
+        // deno: "error: Cannot resolve dependency X"
+        DepPattern {
+            tool_name: "deno",
+            re: Regex::new(r"resolve dependency\s+(\S+)").unwrap(),
+            capture_group: 1,
+            install_template: "deno add {pkg}",
         },
     ]
 });
@@ -87,7 +140,11 @@ pub fn extract_missing_dep(stderr: &str, tool: &str) -> Option<String> {
         }
         if let Some(caps) = pattern.re.captures(stderr) {
             if let Some(pkg) = caps.get(pattern.capture_group) {
-                let pkg_name = pkg.as_str().trim();
+                let pkg_name = pkg
+                    .as_str()
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"');
                 // Strip version specifiers for npm packages
                 let pkg_name = pkg_name
                     .split('@')
@@ -165,4 +222,37 @@ mod tests {
         let result = extract_missing_dep(stderr, "unknown");
         assert!(result.is_none());
     }
+
+    #[test]
+    fn extracts_pnpm_missing() {
+        let stderr = "ERR_PNPM_NO_PACKAGE_MANIFEST No package.json found";
+        let result = extract_missing_dep(stderr, "pnpm");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn extracts_yarn_missing() {
+        let stderr = "error Couldn't find package lodash";
+        let result = extract_missing_dep(stderr, "yarn");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "yarn add lodash");
+    }
+
+    #[test]
+    fn extracts_uv_missing() {
+        let stderr = "error: Package `requests` not found";
+        let result = extract_missing_dep(stderr, "uv");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "uv add requests");
+    }
+
+    #[test]
+    fn extracts_bun_missing() {
+        let stderr = "error: Cannot find package express";
+        let result = extract_missing_dep(stderr, "bun");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "bun add express");
+    }
+
 }
+

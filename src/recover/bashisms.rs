@@ -76,6 +76,54 @@ static BASHISMS: &[Bashism] = &[
         zsh_fix: Some("print"),
         posix_fix: Some("printf"),
     },
+    Bashism {
+        name: "declare -n (nameref)",
+        pattern: "declare -n",
+        zsh_fix: None,
+        posix_fix: None,
+    },
+    Bashism {
+        name: "$'...' ANSI-C quoting",
+        pattern: "$'",
+        zsh_fix: Some("$'"),
+        posix_fix: None,
+    },
+    Bashism {
+        name: "(( )) arithmetic evaluation",
+        pattern: "(( ",
+        zsh_fix: Some("(( "),
+        posix_fix: Some("expr "),
+    },
+    Bashism {
+        name: "$(( )) arithmetic expansion",
+        pattern: "$((",
+        zsh_fix: Some("$(("),
+        posix_fix: Some("$(expr "),
+    },
+    Bashism {
+        name: "here-string (<<<)",
+        pattern: "<<<",
+        zsh_fix: Some("<<<"),
+        posix_fix: None,
+    },
+    Bashism {
+        name: "select loop",
+        pattern: "select ",
+        zsh_fix: Some("select "),
+        posix_fix: None,
+    },
+    Bashism {
+        name: "coproc keyword",
+        pattern: "coproc ",
+        zsh_fix: None,
+        posix_fix: None,
+    },
+    Bashism {
+        name: "PROMPT_COMMAND variable",
+        pattern: "PROMPT_COMMAND",
+        zsh_fix: Some("precmd()"),
+        posix_fix: None,
+    },
 ];
 
 /// Detect bashisms in a command and suggest rewrites for the target shell.
@@ -169,5 +217,21 @@ mod tests {
         let text = result.unwrap();
         assert!(text.contains("indirect"));
         assert!(text.contains("${(P)"));
+    }
+
+    #[test]
+    fn detects_arithmetic_expansion_for_posix() {
+        let result = translate_bashisms("echo $((1 + 1))", "sh");
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("arithmetic expansion"));
+    }
+
+    #[test]
+    fn detects_ansi_c_quoting_for_posix() {
+        let result = translate_bashisms("echo $'hello\\nworld'", "sh");
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("ANSI-C quoting"));
     }
 }
