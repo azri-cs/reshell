@@ -53,6 +53,7 @@ fn parse(path: &str) -> Result<Vec<Segment>, String> {
     let mut segments = Vec::new();
     let mut chars = path.chars().peekable();
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(ch) = chars.next() {
         match ch {
             '.' => {
@@ -106,6 +107,7 @@ fn parse_bracket(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<Seg
     let mut in_string = false;
     let mut escaped = false;
 
+    #[allow(clippy::while_let_on_iterator)]
     while let Some(ch) = chars.next() {
         if escaped {
             content.push(ch);
@@ -195,7 +197,7 @@ fn parse_filter(content: &str) -> Result<Segment, String> {
     for (op_str, op) in &ops {
         if let Some(pos) = rest.find(op_str) {
             // Make sure this is not a prefix of a longer operator we already found.
-            if found.as_ref().map_or(true, |(p, _, _)| pos < *p) {
+            if found.as_ref().is_none_or(|(p, _, _)| pos < *p) {
                 found = Some((pos, op.clone(), op_str.len()));
             }
         }
