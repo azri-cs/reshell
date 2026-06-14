@@ -10,7 +10,7 @@ use crate::exec::{runner::Runner, ExecRequest};
 use crate::recover::resolve::resolve_suggestion;
 use crate::sandbox::paths;
 
-use super::server::ServerState;
+use super::router::ServerState;
 
 pub fn list_tools() -> Vec<Value> {
     vec![
