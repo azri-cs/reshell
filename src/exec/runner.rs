@@ -427,53 +427,69 @@ impl Runner {
                 if fix_cmd != &req.command {
                     self.metrics.record_auto_retry_r22();
                     let fix_req = ExecRequest {
-                    command: fix_cmd.clone(),
-                    cwd: req.cwd.clone(),
-                    timeout: req.timeout.min(60), // cap at 60s for auto-retry
-                    env: req.env.clone(),
-                    retry: false,
-                };
-                // Use execute_once directly (avoids recursive run() call)
-                let fix_attempt = self.execute_once(&fix_req, &detector.execution_shell()).await;
-                match fix_attempt {
-                    Ok(attempt) => {
-                        let success = attempt.exit_code == 0;
-                        // Auto-record feedback
-                        let _ = self
-                            .store
-                            .update_fix_outcome(
-                                &normalized_command,
-                                &normalized_stderr,
-                                Some(fix_cmd),
-                                success,
-                            )
-                            .await;
-                        Some(Box::new(ExecResult {
-                            status: if success { "success".to_string() } else { "failed".to_string() },
-                            recovery_code: if success { "R10".to_string() } else { "R22".to_string() },
-                            recovery_class: if success { "Success".to_string() } else { "Command Not Found".to_string() },
-                            original_command: fix_req.command.clone(),
-                            execution_id: uuid::Uuid::new_v4().to_string(),
-                            output_id: None,
-                            suggestion: serde_json::json!({"action":"none","confidence":"high","reason":"Auto-retry of R22 fix"}),
-                            output: OutputInfo {
-                                stdout: attempt.stdout,
-                                stderr: attempt.stderr,
-                                exit_code: attempt.exit_code,
-                                truncated: false,
-                            },
-                            next_action: None,
-                            compaction_hint: None,
-                            platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
-                            warnings: attempt.warnings,
-                            auto_retry: None,
-                        }))
+                        command: fix_cmd.clone(),
+                        cwd: req.cwd.clone(),
+                        timeout: req.timeout.min(60), // cap at 60s for auto-retry
+                        env: req.env.clone(),
+                        retry: false,
+                    };
+                    // Use execute_once directly (avoids recursive run() call)
+                    let fix_attempt = self
+                        .execute_once(&fix_req, &detector.execution_shell())
+                        .await;
+                    match fix_attempt {
+                        Ok(attempt) => {
+                            let success = attempt.exit_code == 0;
+                            // Auto-record feedback
+                            let _ = self
+                                .store
+                                .update_fix_outcome(
+                                    &normalized_command,
+                                    &normalized_stderr,
+                                    Some(fix_cmd),
+                                    success,
+                                )
+                                .await;
+                            Some(Box::new(ExecResult {
+                                status: if success {
+                                    "success".to_string()
+                                } else {
+                                    "failed".to_string()
+                                },
+                                recovery_code: if success {
+                                    "R10".to_string()
+                                } else {
+                                    "R22".to_string()
+                                },
+                                recovery_class: if success {
+                                    "Success".to_string()
+                                } else {
+                                    "Command Not Found".to_string()
+                                },
+                                original_command: fix_req.command.clone(),
+                                execution_id: uuid::Uuid::new_v4().to_string(),
+                                output_id: None,
+                                suggestion: serde_json::json!({"action":"none","confidence":"high","reason":"Auto-retry of R22 fix"}),
+                                output: OutputInfo {
+                                    stdout: attempt.stdout,
+                                    stderr: attempt.stderr,
+                                    exit_code: attempt.exit_code,
+                                    truncated: false,
+                                },
+                                next_action: None,
+                                compaction_hint: None,
+                                platform: Some(
+                                    crate::memory::pattern::current_platform_tag().to_string(),
+                                ),
+                                warnings: attempt.warnings,
+                                auto_retry: None,
+                            }))
+                        }
+                        Err(_) => None,
                     }
-                    Err(_) => None,
+                } else {
+                    None
                 }
-            } else {
-                None
-            }
             } else {
                 None
             }

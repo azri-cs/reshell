@@ -70,14 +70,14 @@ fn navigate<'a>(value: &'a Value, segments: &[PathSegment]) -> Result<&'a Value,
     for (i, seg) in segments.iter().enumerate() {
         match seg {
             PathSegment::Key(key) => {
-                current = current.get(key).ok_or_else(|| {
-                    format!("Key '{}' not found at segment {}", key, i)
-                })?;
+                current = current
+                    .get(key)
+                    .ok_or_else(|| format!("Key '{}' not found at segment {}", key, i))?;
             }
             PathSegment::Index(idx) => {
-                current = current.get(*idx).ok_or_else(|| {
-                    format!("Index {} out of bounds at segment {}", idx, i)
-                })?;
+                current = current
+                    .get(*idx)
+                    .ok_or_else(|| format!("Index {} out of bounds at segment {}", idx, i))?;
             }
         }
     }

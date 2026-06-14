@@ -159,7 +159,10 @@ pub(crate) async fn handle_tool_call(
             }
         }
         "rsh_env" => {
-            let refresh = arguments.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false);
+            let refresh = arguments
+                .get("refresh")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if refresh {
                 Detector::invalidate_cache().await;
             }
@@ -373,7 +376,10 @@ pub(crate) async fn handle_tool_call(
                 };
                 match crate::compact::jq::extract_json_path(&content, jq_path) {
                     Ok(extracted) => {
-                        return (json!({ "status": "success", "extracted": extracted }), false);
+                        return (
+                            json!({ "status": "success", "extracted": extracted }),
+                            false,
+                        );
                     }
                     Err(e) => {
                         return (
@@ -518,26 +524,31 @@ pub(crate) async fn handle_tool_call(
         "rsh_read_file" => {
             let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
             match paths::validate_and_read_file(path) {
-                Ok((resolved_path, content)) => {
-                    (json!({
+                Ok((resolved_path, content)) => (
+                    json!({
                         "path": resolved_path.to_string_lossy(),
                         "content": content,
                         "line_count": content.lines().count(),
-                    }), false)
-                }
+                    }),
+                    false,
+                ),
                 Err(e) => (json!({"error": format!("File read blocked: {}", e)}), true),
             }
         }
         "rsh_write_file" => {
             let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let content = arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let content = arguments
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             match paths::validate_and_create_file(path, content) {
-                Ok(resolved_path) => {
-                    (json!({
+                Ok(resolved_path) => (
+                    json!({
                         "path": resolved_path.to_string_lossy(),
                         "bytes_written": content.len(),
-                    }), false)
-                }
+                    }),
+                    false,
+                ),
                 Err(e) => (json!({"error": format!("File write blocked: {}", e)}), true),
             }
         }

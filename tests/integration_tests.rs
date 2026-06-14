@@ -177,7 +177,7 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
     let home = unique_home_dir();
 
     let first = Command::new(rsh_bin())
-        .args(["exec", "--command",             "printf 'line1\nline2\n' && true"])
+        .args(["exec", "--command", "printf 'line1\nline2\n' && true"])
         .env("HOME", &home)
         .output()
         .await
@@ -523,7 +523,13 @@ async fn test_mcp_missing_content_length() {
 }
 
 /// Helper: spawn an MCP server, initialize, return (child, stdin, reader).
-async fn spawn_mcp_server(home: &std::path::Path) -> (tokio::process::Child, tokio::process::ChildStdin, BufReader<tokio::process::ChildStdout>) {
+async fn spawn_mcp_server(
+    home: &std::path::Path,
+) -> (
+    tokio::process::Child,
+    tokio::process::ChildStdin,
+    BufReader<tokio::process::ChildStdout>,
+) {
     let mut child = Command::new(rsh_bin())
         .args(["mcp"])
         .env("HOME", home)
@@ -572,8 +578,15 @@ async fn test_mcp_feedback_and_stats() {
     let resp = read_frame(&mut reader).await.unwrap();
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let st: Value = serde_json::from_str(text).unwrap();
-    assert!(st["patterns"]["total"].as_i64().unwrap_or(0) > 0, "stats should show at least 1 pattern");
-    assert!(st["patterns"]["by_recovery_code"].is_array() || st["patterns"]["by_recovery_code"].is_object(), "by_recovery_code should be present");
+    assert!(
+        st["patterns"]["total"].as_i64().unwrap_or(0) > 0,
+        "stats should show at least 1 pattern"
+    );
+    assert!(
+        st["patterns"]["by_recovery_code"].is_array()
+            || st["patterns"]["by_recovery_code"].is_object(),
+        "by_recovery_code should be present"
+    );
 
     let _ = child.kill().await;
 }
@@ -596,8 +609,13 @@ async fn test_mcp_resources_list_and_read() {
     write_frame(&mut stdin, &list).await;
     let resp = read_frame(&mut reader).await.unwrap();
     let resources = resp["result"]["resources"].as_array().unwrap();
-    assert!(!resources.is_empty(), "Resources should not be empty after exec");
-    let found = resources.iter().any(|r| r["uri"].as_str().unwrap().contains(&output_id));
+    assert!(
+        !resources.is_empty(),
+        "Resources should not be empty after exec"
+    );
+    let found = resources
+        .iter()
+        .any(|r| r["uri"].as_str().unwrap().contains(&output_id));
     assert!(found, "Resource should include the output from exec");
 
     // Read the specific resource
@@ -620,9 +638,18 @@ async fn test_mcp_prompts_list_and_get() {
     write_frame(&mut stdin, &list).await;
     let resp = read_frame(&mut reader).await.unwrap();
     let prompts = resp["result"]["prompts"].as_array().unwrap();
-    let names: Vec<&str> = prompts.iter().map(|p| p["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"recovery_analysis"), "Should have recovery_analysis prompt");
-    assert!(names.contains(&"environment_audit"), "Should have environment_audit prompt");
+    let names: Vec<&str> = prompts
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"recovery_analysis"),
+        "Should have recovery_analysis prompt"
+    );
+    assert!(
+        names.contains(&"environment_audit"),
+        "Should have environment_audit prompt"
+    );
 
     // Get recovery_analysis prompt
     let get = json!({"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"recovery_analysis","arguments":{"recovery_code":"R22","original_command":"gh pr view"}}});
@@ -631,7 +658,10 @@ async fn test_mcp_prompts_list_and_get() {
     let messages = resp["result"]["messages"].as_array().unwrap();
     assert!(!messages.is_empty());
     let text = messages[0]["content"]["text"].as_str().unwrap();
-    assert!(text.contains("recovery_code"), "Prompt should discuss failure analysis");
+    assert!(
+        text.contains("recovery_code"),
+        "Prompt should discuss failure analysis"
+    );
 
     // Get environment_audit prompt
     let get = json!({"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"environment_audit"}});
@@ -640,7 +670,10 @@ async fn test_mcp_prompts_list_and_get() {
     let messages = resp["result"]["messages"].as_array().unwrap();
     assert!(!messages.is_empty());
     let text = messages[0]["content"]["text"].as_str().unwrap();
-    assert!(text.contains("rsh_env") || text.contains("environment"), "Prompt should reference environment detection");
+    assert!(
+        text.contains("rsh_env") || text.contains("environment"),
+        "Prompt should reference environment detection"
+    );
 
     let _ = child.kill().await;
 }

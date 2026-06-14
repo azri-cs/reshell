@@ -48,12 +48,7 @@ impl OverlaySandbox {
     }
 
     #[cfg(target_os = "linux")]
-    fn mount_overlay(
-        lower: &Path,
-        upper: &Path,
-        work: &Path,
-        target: &Path,
-    ) -> anyhow::Result<()> {
+    fn mount_overlay(lower: &Path, upper: &Path, work: &Path, target: &Path) -> anyhow::Result<()> {
         use std::process::Command;
 
         let opts = format!(
