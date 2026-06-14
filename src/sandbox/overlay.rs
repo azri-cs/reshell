@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
+use super::{Sandbox, SandboxContext, NetworkPolicy};
+
 pub struct OverlaySandbox {
     #[allow(dead_code)]
     lowerdir: PathBuf,
@@ -98,6 +100,35 @@ impl OverlaySandbox {
 
     pub fn upper_dir(&self) -> &Path {
         self.upperdir.path()
+    }
+}
+
+impl Sandbox for OverlaySandbox {
+    fn prepare(&self, _cwd: &Path) -> anyhow::Result<Box<dyn SandboxContext>> {
+        if self.active {
+            if let Some(ref mount) = self.mount_point {
+                return Ok(Box::new(OverlayContext { work_dir: mount.clone() }));
+            }
+        }
+        Ok(Box::new(OverlayContext { work_dir: self.lowerdir.clone() }))
+    }
+
+    fn network_policy(&self) -> NetworkPolicy {
+        NetworkPolicy::Inherit
+    }
+
+    fn name(&self) -> &'static str {
+        "overlay"
+    }
+}
+
+pub struct OverlayContext {
+    work_dir: PathBuf,
+}
+
+impl SandboxContext for OverlayContext {
+    fn work_dir(&self) -> &Path {
+        &self.work_dir
     }
 }
 

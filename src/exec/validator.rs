@@ -47,6 +47,14 @@ static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         .unwrap(),
         // Shell -c with dangerous inner commands (bash -c 'eval ...', zsh -c 'source ...')
         Regex::new(r"(?i)\b(bash|zsh|dash|ksh|sh)\s+.*-c\s+.*\b(eval|source|\.)\b").unwrap(),
+        // Base64-encoded command pipeline
+        Regex::new(r"(?i)(?:base64|base32|base64decode)\s+[A-Za-z0-9+/=]{20,}\s*\|\s*(sh|bash|zsh|dash|ksh)").unwrap(),
+        // Hex-encoded command pipeline
+        Regex::new(r"(?i)(?:printf|echo)\s+[A-Za-z0-9+/=%]{20,}\s*\|\s*(sh|bash|zsh|dash|ksh)").unwrap(),
+        // Backtick subshell in strings
+        Regex::new("(?i)[\x60\x24][\x28\x7b][A-Za-z0-9/]").unwrap(),
+        // eval with shell redirection
+        Regex::new(r"(?i)\beval\s+.*(?:>\s*|\||;)\s*(?:<<|>>|>&|/dev/)").unwrap(),
         // awk/sed with system() calls
         Regex::new(r"(?i)\bawk\b.*\bsystem\s*\(").unwrap(),
         Regex::new(r"(?i)\bsed\b.*-e\s.*\|\s*(bash|sh|zsh)").unwrap(),
