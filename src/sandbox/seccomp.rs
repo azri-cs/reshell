@@ -9,9 +9,17 @@
 /// Apply a seccomp filter to the current thread/process.
 /// Must be called in the child process before exec.
 pub fn apply_seccomp_filter() -> Result<(), String> {
+    let result = apply_seccomp_inner();
+    if let Err(e) = &result {
+        crate::config::warn(&format!("seccomp filter failed: {}", e));
+    }
+    result
+}
+
+fn apply_seccomp_inner() -> Result<(), String> {
     #[cfg(all(target_os = "linux", feature = "seccomp"))]
     {
-        return apply_linux_seccomp();
+        apply_linux_seccomp()
     }
     #[cfg(not(all(target_os = "linux", feature = "seccomp")))]
     {
@@ -44,36 +52,39 @@ fn apply_linux_seccomp() -> Result<(), String> {
         .map_err(|e| format!("Failed to create seccomp filter: {}", e))?;
 
     // Block dangerous syscalls — these are never needed by typical build/CLI tools
-    let blocked_syscalls = [
-        ScmpSyscall::new("ptrace"),
-        ScmpSyscall::new("mount"),
-        ScmpSyscall::new("umount2"),
-        ScmpSyscall::new("pivot_root"),
-        ScmpSyscall::new("chroot"),
-        ScmpSyscall::new("kexec_load"),
-        ScmpSyscall::new("kexec_file_load"),
-        ScmpSyscall::new("init_module"),
-        ScmpSyscall::new("finit_module"),
-        ScmpSyscall::new("delete_module"),
-        ScmpSyscall::new("create_module"),
-        ScmpSyscall::new("iopl"),
-        ScmpSyscall::new("ioperm"),
-        ScmpSyscall::new("swapon"),
-        ScmpSyscall::new("swapoff"),
-        ScmpSyscall::new("reboot"),
-        ScmpSyscall::new("acct"),
-        ScmpSyscall::new("add_key"),
-        ScmpSyscall::new("request_key"),
-        ScmpSyscall::new("keyctl"),
-        ScmpSyscall::new("bpf"),
-        ScmpSyscall::new("perf_event_open"),
-        ScmpSyscall::new("fanotify_init"),
+    let blocked_syscall_names = [
+        "ptrace",
+        "mount",
+        "umount2",
+        "pivot_root",
+        "chroot",
+        "kexec_load",
+        "kexec_file_load",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "create_module",
+        "iopl",
+        "ioperm",
+        "swapon",
+        "swapoff",
+        "reboot",
+        "acct",
+        "add_key",
+        "request_key",
+        "keyctl",
+        "bpf",
+        "perf_event_open",
+        "fanotify_init",
     ];
 
-    for syscall in blocked_syscalls {
+    for name in &blocked_syscall_names {
+        let syscall = ScmpSyscall::from_name(name)
+            .map_err(|e| format!("Failed to resolve syscall '{}': {}", name, e))?;
+
         filter
             .add_rule(ScmpAction::KillProcess, syscall)
-            .map_err(|e| format!("Failed to add seccomp rule for {}: {}", syscall, e))?;
+            .map_err(|e| format!("Failed to add seccomp rule for {}: {}", name, e))?;
     }
 
     // Load the filter

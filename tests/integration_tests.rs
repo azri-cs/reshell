@@ -14,8 +14,22 @@ fn unique_home_dir() -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     let path = std::env::temp_dir().join(format!("reshell-test-{}", nanos));
-    std::fs::create_dir_all(&path).unwrap();
+    std::fs::create_dir_all(path.join(".reshell")).unwrap();
     path
+}
+
+/// Isolate pattern DB and home dir per test (Windows uses USERPROFILE, not HOME).
+fn apply_test_env(cmd: &mut Command, home: &std::path::Path) {
+    let db_path = home.join(".reshell").join("patterns.db");
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd.env("RSH_PATTERN_DB", db_path);
+}
+
+fn rsh_command(home: &std::path::Path) -> Command {
+    let mut cmd = Command::new(rsh_bin());
+    apply_test_env(&mut cmd, home);
+    cmd
 }
 
 // ── MCP framing helpers ─────────────────────────────────────────────
@@ -63,9 +77,8 @@ async fn read_frame(reader: &mut BufReader<tokio::process::ChildStdout>) -> Opti
 #[tokio::test]
 async fn test_cli_exec_echo() {
     let home = unique_home_dir();
-    let output = Command::new(rsh_bin())
+    let output = rsh_command(&home)
         .args(["exec", "--command", "echo hello"])
-        .env("HOME", &home)
         .output()
         .await
         .expect("Failed to spawn rsh");
@@ -83,9 +96,8 @@ async fn test_cli_exec_echo() {
 #[tokio::test]
 async fn test_cli_exec_command_not_found() {
     let home = unique_home_dir();
-    let output = Command::new(rsh_bin())
+    let output = rsh_command(&home)
         .args(["exec", "--command", "nonexistent_command_xyz"])
-        .env("HOME", &home)
         .output()
         .await
         .expect("Failed to spawn rsh");
@@ -103,9 +115,8 @@ async fn test_cli_exec_command_not_found() {
 #[tokio::test]
 async fn test_cli_exec_blocked_interactive() {
     let home = unique_home_dir();
-    let output = Command::new(rsh_bin())
+    let output = rsh_command(&home)
         .args(["exec", "--command", "vim file.txt"])
-        .env("HOME", &home)
         .output()
         .await
         .expect("Failed to spawn rsh");
@@ -123,9 +134,8 @@ async fn test_cli_exec_blocked_interactive() {
 #[tokio::test]
 async fn test_cli_env() {
     let home = unique_home_dir();
-    let output = Command::new(rsh_bin())
+    let output = rsh_command(&home)
         .args(["env"])
-        .env("HOME", &home)
         .output()
         .await
         .expect("Failed to spawn rsh");
@@ -140,13 +150,12 @@ async fn test_cli_env() {
 async fn test_cli_compact_output_id_and_view() {
     let home = unique_home_dir();
 
-    let exec_output = Command::new(rsh_bin())
+    let exec_output = rsh_command(&home)
         .args([
             "exec",
             "--command",
             "printf 'INFO start\nWARN slow\nERROR failed\n' 2>&1 | cat",
         ])
-        .env("HOME", &home)
         .output()
         .await
         .expect("Failed to spawn rsh");
@@ -156,9 +165,8 @@ async fn test_cli_compact_output_id_and_view() {
     let result: Value = serde_json::from_str(&stdout).expect("Invalid JSON");
     let output_id = result["output_id"].as_str().unwrap();
 
-    let compact_output = Command::new(rsh_bin())
+    let compact_output = rsh_command(&home)
         .args(["compact", "--output-id", output_id, "--view", "errors_only"])
-        .env("HOME", &home)
         .output()
         .await
         .expect("Failed to compact output id");
@@ -176,35 +184,50 @@ async fn test_cli_compact_output_id_and_view() {
 async fn test_cli_compact_output_id_diff_uses_previous_output() {
     let home = unique_home_dir();
 
-    let first = Command::new(rsh_bin())
-        .args(["exec", "--command", "printf 'line1\nline2\n' && true"])
-        .env("HOME", &home)
+    let first = rsh_command(&home)
+        .args(["exec", "--command", "printf '%s\n' line1 line2 | cat"])
         .output()
         .await
         .expect("Failed first exec");
-    assert!(first.status.success());
+    assert!(
+        first.status.success(),
+        "first exec failed: status={} stdout={:?} stderr={:?}",
+        first.status,
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
     let second_output_id = {
-        let second = Command::new(rsh_bin())
-            .args(["exec", "--command", "printf 'line1\nline3\n' && true"])
-            .env("HOME", &home)
+        let second = rsh_command(&home)
+            .args(["exec", "--command", "printf '%s\n' line1 line3 | cat"])
             .output()
             .await
             .expect("Failed second exec");
-        assert!(second.status.success());
+        assert!(
+            second.status.success(),
+            "second exec failed: status={} stdout={:?} stderr={:?}",
+            second.status,
+            String::from_utf8_lossy(&second.stdout),
+            String::from_utf8_lossy(&second.stderr)
+        );
         let second_result: Value =
             serde_json::from_str(&String::from_utf8_lossy(&second.stdout)).unwrap();
         second_result["output_id"].as_str().unwrap().to_string()
     };
 
-    let third = Command::new(rsh_bin())
-        .args(["exec", "--command", "printf 'later\noutput\n'"])
-        .env("HOME", &home)
+    let third = rsh_command(&home)
+        .args(["exec", "--command", "printf '%s\n' later output | cat"])
         .output()
         .await
         .expect("Failed third exec");
-    assert!(third.status.success());
+    assert!(
+        third.status.success(),
+        "third exec failed: status={} stdout={:?} stderr={:?}",
+        third.status,
+        String::from_utf8_lossy(&third.stdout),
+        String::from_utf8_lossy(&third.stderr)
+    );
 
-    let diff = Command::new(rsh_bin())
+    let diff = rsh_command(&home)
         .args([
             "compact",
             "--output-id",
@@ -212,7 +235,6 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
             "--view",
             "diff",
         ])
-        .env("HOME", &home)
         .output()
         .await
         .expect("Failed diff compact");
@@ -226,9 +248,8 @@ async fn test_cli_compact_output_id_diff_uses_previous_output() {
 #[tokio::test]
 async fn test_mcp_initialize() {
     let home = unique_home_dir();
-    let mut child = Command::new(rsh_bin())
+    let mut child = rsh_command(&home)
         .args(["mcp"])
-        .env("HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -312,9 +333,8 @@ async fn test_mcp_initialize() {
 #[tokio::test]
 async fn test_mcp_recover_suggestion() {
     let home = unique_home_dir();
-    let mut child = Command::new(rsh_bin())
+    let mut child = rsh_command(&home)
         .args(["mcp"])
-        .env("HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -365,9 +385,8 @@ async fn test_mcp_recover_suggestion() {
 #[tokio::test]
 async fn test_mcp_rsh_check() {
     let home = unique_home_dir();
-    let mut child = Command::new(rsh_bin())
+    let mut child = rsh_command(&home)
         .args(["mcp"])
-        .env("HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -424,9 +443,8 @@ async fn test_mcp_rsh_check() {
 #[tokio::test]
 async fn test_mcp_jsonrpc_version_validation() {
     let home = unique_home_dir();
-    let mut child = Command::new(rsh_bin())
+    let mut child = rsh_command(&home)
         .args(["mcp"])
-        .env("HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -459,9 +477,8 @@ async fn test_mcp_jsonrpc_version_validation() {
 #[tokio::test]
 async fn test_mcp_ping() {
     let home = unique_home_dir();
-    let mut child = Command::new(rsh_bin())
+    let mut child = rsh_command(&home)
         .args(["mcp"])
-        .env("HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -490,9 +507,8 @@ async fn test_mcp_ping() {
 #[tokio::test]
 async fn test_mcp_missing_content_length() {
     let home = unique_home_dir();
-    let mut child = Command::new(rsh_bin())
+    let mut child = rsh_command(&home)
         .args(["mcp"])
-        .env("HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -530,9 +546,8 @@ async fn spawn_mcp_server(
     tokio::process::ChildStdin,
     BufReader<tokio::process::ChildStdout>,
 ) {
-    let mut child = Command::new(rsh_bin())
+    let mut child = rsh_command(home)
         .args(["mcp"])
-        .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

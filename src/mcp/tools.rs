@@ -7,9 +7,9 @@ use crate::classify::taxonomy::RecoveryCode;
 use crate::compact::view::{render_view, CompactView};
 use crate::env::Detector;
 use crate::exec::{runner::Runner, ExecRequest};
+use crate::memory::Store;
 use crate::recover::resolve::resolve_suggestion;
 use crate::sandbox::paths;
-use crate::memory::Store;
 
 use super::router::ServerState;
 

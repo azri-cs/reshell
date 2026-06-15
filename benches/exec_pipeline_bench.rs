@@ -1,5 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use reshell::exec::runner::Runner;
+use reshell::exec::BinaryHandling;
 use reshell::exec::ExecRequest;
 use reshell::memory::Store;
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ fn bench_exec_simple(c: &mut Criterion) {
                 timeout: 30,
                 env: HashMap::new(),
                 retry: false,
+                binary_handling: BinaryHandling::Summary,
             };
             let result = rt.block_on(runner.run(black_box(&request)));
             let _ = black_box(result);

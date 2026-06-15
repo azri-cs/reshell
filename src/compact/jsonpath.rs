@@ -172,12 +172,20 @@ fn parse_slice(content: &str) -> Result<Segment, String> {
     let start = if parts[0].is_empty() {
         None
     } else {
-        Some(parts[0].parse().map_err(|_| format!("Invalid slice start: {}", parts[0]))?)
+        Some(
+            parts[0]
+                .parse()
+                .map_err(|_| format!("Invalid slice start: {}", parts[0]))?,
+        )
     };
     let end = if parts[1].is_empty() {
         None
     } else {
-        Some(parts[1].parse().map_err(|_| format!("Invalid slice end: {}", parts[1]))?)
+        Some(
+            parts[1]
+                .parse()
+                .map_err(|_| format!("Invalid slice end: {}", parts[1]))?,
+        )
     };
     Ok(Segment::Slice(start, end))
 }
@@ -192,7 +200,14 @@ fn parse_filter(content: &str) -> Result<Segment, String> {
 
     // Find operator by scanning for comparison tokens, respecting that the key
     // comes first after @.
-    let ops = [("<=", Op::Le), (">=", Op::Ge), ("==", Op::Eq), ("!=", Op::Ne), ("<", Op::Lt), (">", Op::Gt)];
+    let ops = [
+        ("<=", Op::Le),
+        (">=", Op::Ge),
+        ("==", Op::Eq),
+        ("!=", Op::Ne),
+        ("<", Op::Lt),
+        (">", Op::Gt),
+    ];
     let mut found: Option<(usize, Op, usize)> = None;
     for (op_str, op) in &ops {
         if let Some(pos) = rest.find(op_str) {
@@ -203,7 +218,8 @@ fn parse_filter(content: &str) -> Result<Segment, String> {
         }
     }
 
-    let (pos, op, op_len) = found.ok_or_else(|| format!("No comparison operator in filter: {}", content))?;
+    let (pos, op, op_len) =
+        found.ok_or_else(|| format!("No comparison operator in filter: {}", content))?;
     let key = rest[..pos].trim().to_string();
     let value_str = rest[pos + op_len..].trim();
 
@@ -233,7 +249,9 @@ fn navigate(value: &Value, segments: &[Segment]) -> Result<Value, String> {
                 .cloned()
                 .ok_or_else(|| format!("Key '{}' not found at segment {}", key, i))?,
             Segment::Index(idx) => {
-                let arr = current.as_array().ok_or_else(|| format!("Expected array at segment {}", i))?;
+                let arr = current
+                    .as_array()
+                    .ok_or_else(|| format!("Expected array at segment {}", i))?;
                 let len = arr.len() as i64;
                 let real_idx = if *idx < 0 { len + *idx } else { *idx };
                 if real_idx < 0 || real_idx >= len {
@@ -244,10 +262,17 @@ fn navigate(value: &Value, segments: &[Segment]) -> Result<Value, String> {
             Segment::Wildcard => match current {
                 Value::Object(map) => Value::Array(map.values().cloned().collect()),
                 Value::Array(arr) => Value::Array(arr),
-                _ => return Err(format!("Cannot wildcard over non-container at segment {}", i)),
+                _ => {
+                    return Err(format!(
+                        "Cannot wildcard over non-container at segment {}",
+                        i
+                    ))
+                }
             },
             Segment::Slice(start, end) => {
-                let arr = current.as_array().ok_or_else(|| format!("Expected array for slice at segment {}", i))?;
+                let arr = current
+                    .as_array()
+                    .ok_or_else(|| format!("Expected array for slice at segment {}", i))?;
                 let len = arr.len() as i64;
                 let start = start.unwrap_or(0);
                 let end = end.unwrap_or(len);
@@ -256,7 +281,9 @@ fn navigate(value: &Value, segments: &[Segment]) -> Result<Value, String> {
                 Value::Array(arr[start..end].to_vec())
             }
             Segment::Filter(comp) => {
-                let arr = current.as_array().ok_or_else(|| format!("Expected array for filter at segment {}", i))?;
+                let arr = current
+                    .as_array()
+                    .ok_or_else(|| format!("Expected array for filter at segment {}", i))?;
                 let filtered: Vec<Value> = arr
                     .iter()
                     .filter(|item| matches_filter(item, comp))

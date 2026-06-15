@@ -64,8 +64,6 @@ impl SandboxContext for NoopContext {
     }
 }
 
-/// Docker-based sandbox (requires Docker daemon).
-#[cfg(any())]
 pub mod docker;
 
 /// Landlock-based sandbox (Linux kernel >= 5.13).
@@ -87,6 +85,9 @@ pub fn create_sandbox(mode: &str) -> anyhow::Result<Box<dyn Sandbox>> {
             let sb = docker::DockerSandbox::new()?;
             Ok(Box::new(sb))
         }
-        _ => anyhow::bail!("Unknown sandbox mode: {}. Use 'none', 'overlay', 'landlock', or 'docker'.", mode),
+        _ => anyhow::bail!(
+            "Unknown sandbox mode: {}. Use 'none', 'overlay', 'landlock', or 'docker'.",
+            mode
+        ),
     }
 }

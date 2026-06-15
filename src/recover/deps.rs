@@ -61,7 +61,8 @@ static DEP_PATTERNS: Lazy<Vec<DepPattern>> = Lazy::new(|| {
         // composer: "Could not find package X"
         DepPattern {
             tool_name: "composer",
-            re: Regex::new(r#"(?:Could not find|Root package) .*? requires? ['"]?([^'",]+)['"]?"#).unwrap(),
+            re: Regex::new(r#"(?:Could not find|Root package) .*? requires? ['"]?([^'",]+)['"]?"#)
+                .unwrap(),
             capture_group: 1,
             install_template: "composer require {pkg}",
         },
@@ -140,11 +141,7 @@ pub fn extract_missing_dep(stderr: &str, tool: &str) -> Option<String> {
         }
         if let Some(caps) = pattern.re.captures(stderr) {
             if let Some(pkg) = caps.get(pattern.capture_group) {
-                let pkg_name = pkg
-                    .as_str()
-                    .trim()
-                    .trim_matches('\'')
-                    .trim_matches('"');
+                let pkg_name = pkg.as_str().trim().trim_matches('\'').trim_matches('"');
                 // Strip version specifiers for npm packages
                 let pkg_name = pkg_name
                     .split('@')
@@ -253,6 +250,4 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "bun add express");
     }
-
 }
-

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-use super::{Sandbox, SandboxContext, NetworkPolicy};
+use super::{NetworkPolicy, Sandbox, SandboxContext};
 
 pub struct OverlaySandbox {
     #[allow(dead_code)]
@@ -107,10 +107,14 @@ impl Sandbox for OverlaySandbox {
     fn prepare(&self, _cwd: &Path) -> anyhow::Result<Box<dyn SandboxContext>> {
         if self.active {
             if let Some(ref mount) = self.mount_point {
-                return Ok(Box::new(OverlayContext { work_dir: mount.clone() }));
+                return Ok(Box::new(OverlayContext {
+                    work_dir: mount.clone(),
+                }));
             }
         }
-        Ok(Box::new(OverlayContext { work_dir: self.lowerdir.clone() }))
+        Ok(Box::new(OverlayContext {
+            work_dir: self.lowerdir.clone(),
+        }))
     }
 
     fn network_policy(&self) -> NetworkPolicy {

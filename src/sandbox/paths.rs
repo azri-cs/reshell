@@ -3,6 +3,18 @@ use std::path::{Path, PathBuf};
 /// Maximum allowed file size for reading via compact (10 MB).
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
+/// Return the canonicalized current working directory.
+///
+/// Required on Windows because `Path::canonicalize()` returns an extended-length
+/// UNC path (\\?\C:\...) while `std::env::current_dir()` returns the normal
+/// form. Comparing the two directly would reject valid in-CWD files.
+fn canonical_cwd() -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("Cannot determine current working directory: {}", e))?;
+    cwd.canonicalize()
+        .map_err(|e| anyhow::anyhow!("Cannot canonicalize working directory: {}", e))
+}
+
 /// Validate that a file path is within the allowed directory tree (CWD by default)
 /// and does not traverse outside it. Also validates the file exists and is not too large.
 ///
@@ -15,6 +27,11 @@ pub fn validate_file_path(file_path: &str) -> anyhow::Result<PathBuf> {
     if path_str.contains("..") {
         anyhow::bail!("Path traversal blocked: '..' not allowed in file path");
     }
+
+    // Resolve the CWD once so comparisons are against the real path.
+    // This is required on Windows, where canonicalize() returns an
+    // extended-length path (\\?\...) while current_dir() does not.
+    let cwd = canonical_cwd()?;
 
     // Block absolute paths to sensitive system locations
     if path.is_absolute() {
@@ -29,7 +46,6 @@ pub fn validate_file_path(file_path: &str) -> anyhow::Result<PathBuf> {
             "/home",
         ];
         // Allow paths under CWD even if absolute
-        let cwd = std::env::current_dir().unwrap_or_default();
         if let Ok(canonical) = path.canonicalize() {
             if canonical.starts_with(&cwd) {
                 return validate_file_metadata(&canonical);
@@ -54,7 +70,6 @@ pub fn validate_file_path(file_path: &str) -> anyhow::Result<PathBuf> {
     };
 
     // Verify the resolved path is within CWD
-    let cwd = std::env::current_dir().unwrap_or_default();
     if !canonical.starts_with(&cwd) {
         anyhow::bail!(
             "Path traversal blocked: '{}' resolves outside working directory",
@@ -112,7 +127,7 @@ pub fn validate_and_create_file(file_path: &str, content: &str) -> anyhow::Resul
         anyhow::bail!("Path traversal blocked: '..' not allowed in file path");
     }
 
-    let cwd = std::env::current_dir()?;
+    let cwd = canonical_cwd()?;
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

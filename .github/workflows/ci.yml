@@ -24,6 +24,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y --no-install-recommends libseccomp-dev
+
       - name: Cargo fmt (check)
         run: cargo fmt --all -- --check
 
@@ -66,6 +70,9 @@ jobs:
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y --no-install-recommends libseccomp-dev
 
       - name: Generate coverage
         run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info

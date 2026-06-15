@@ -2,29 +2,38 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use reshell::mcp::Router;
 use reshell::memory::metrics::Metrics;
 use reshell::memory::Store;
-use reshell::mcp::Router;
 
 fn unique_home_dir() -> std::path::PathBuf {
     let base = std::env::temp_dir().join("reshell-sse-tests");
     let id = uuid::Uuid::new_v4().to_string();
     let home = base.join(id);
-    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(home.join(".reshell")).unwrap();
     home
+}
+
+fn apply_test_env(home: &std::path::Path) {
+    let db_path = home.join(".reshell").join("patterns.db");
+    std::env::set_var("HOME", home);
+    std::env::set_var("USERPROFILE", home);
+    std::env::set_var("RSH_PATTERN_DB", db_path);
 }
 
 #[tokio::test]
 async fn test_sse_tools_list() {
     let home = unique_home_dir();
-    std::env::set_var("HOME", &home);
+    apply_test_env(&home);
 
     let store = Store::new().unwrap();
     let metrics = Arc::new(Metrics::new());
     let router = Arc::new(Router::new(store, metrics));
 
     let addr: std::net::SocketAddr = ([127, 0, 0, 1], 0).into();
-    let server = reshell::mcp::sse::SseServer::start(addr, router).await.unwrap();
+    let server = reshell::mcp::sse::SseServer::start(addr, router)
+        .await
+        .unwrap();
     let local_addr = server.local_addr();
 
     let client = reqwest::Client::builder()

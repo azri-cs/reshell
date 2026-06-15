@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Sandbox, SandboxContext, NetworkPolicy, NoopContext};
+use super::{NetworkPolicy, NoopContext, Sandbox, SandboxContext};
 
 #[allow(dead_code)]
 /// Landlock-based filesystem sandbox.
@@ -28,9 +28,7 @@ impl LandlockSandbox {
             PathBuf::from("/etc"),
             PathBuf::from("/tmp"),
         ];
-        let allowed_write = vec![
-            PathBuf::from("/tmp"),
-        ];
+        let allowed_write = vec![PathBuf::from("/tmp")];
 
         Ok(Self {
             allowed_read,
@@ -43,7 +41,9 @@ impl LandlockSandbox {
         // This is a best-effort check; if Landlock is not available we fall back to a warning.
         let available = Path::new("/proc/sys/kernel/landlock").exists();
         if !available {
-            anyhow::bail!("Landlock is not available on this system (kernel < 5.13 or LSM not enabled)");
+            anyhow::bail!(
+                "Landlock is not available on this system (kernel < 5.13 or LSM not enabled)"
+            );
         }
         Ok(())
     }
@@ -54,7 +54,9 @@ impl Sandbox for LandlockSandbox {
         // TODO: Apply Landlock rules using the `landlock` crate or raw syscalls.
         // For now, this is a no-op context that records the CWD.
         let _ = cwd;
-        Ok(Box::new(NoopContext { cwd: cwd.to_path_buf() }))
+        Ok(Box::new(NoopContext {
+            cwd: cwd.to_path_buf(),
+        }))
     }
 
     fn network_policy(&self) -> NetworkPolicy {

@@ -27,6 +27,14 @@ impl Store {
         Self::new_for_cwd(None::<&Path>)
     }
 
+    fn resolve_home_dir() -> PathBuf {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     pub fn new_for_cwd(cwd: Option<&Path>) -> anyhow::Result<Self> {
         let path = if let Ok(env_path) = std::env::var("RSH_PATTERN_DB") {
             PathBuf::from(env_path)
@@ -35,14 +43,12 @@ impl Store {
             if project_db.exists() {
                 project_db
             } else {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
+                Self::resolve_home_dir()
                     .join(".reshell")
                     .join("patterns.db")
             }
         } else {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
+            Self::resolve_home_dir()
                 .join(".reshell")
                 .join("patterns.db")
         };

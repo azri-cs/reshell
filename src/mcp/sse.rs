@@ -6,12 +6,12 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http_body::{Body, Frame};
-use serde_json::json;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use serde_json::json;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
@@ -106,7 +106,9 @@ async fn handle_sse_connect(state: SseState) -> Result<Response<SseBody>, hyper:
         .send(format!("event: endpoint\ndata: {}\n\n", endpoint))
         .await;
     let _ = tx
-        .send("data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\n".to_string())
+        .send(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\n".to_string(),
+        )
         .await;
 
     Ok(Response::builder()

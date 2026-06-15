@@ -3,8 +3,8 @@
 //! Provides detailed explanations of why a command was blocked or allowed,
 //! for use with `rsh check --verbose`.
 
-use super::validator;
 use super::analyze;
+use super::validator;
 
 /// An audit result explaining what checks were performed and their outcomes.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -135,10 +135,7 @@ pub fn audit_command(command: &str) -> AuditResult {
         detail: if validation_passed {
             "Command passed all validation checks.".to_string()
         } else {
-            format!(
-                "Command blocked: {}",
-                validation_error.as_ref().unwrap()
-            )
+            format!("Command blocked: {}", validation_error.as_ref().unwrap())
         },
     });
 
@@ -161,7 +158,8 @@ pub fn audit_command(command: &str) -> AuditResult {
         },
     });
 
-    let allowed = validation_passed && !interactive && quotes_balanced && !has_c_flag && !analysis.blocked;
+    let allowed =
+        validation_passed && !interactive && quotes_balanced && !has_c_flag && !analysis.blocked;
     let reason = if allowed {
         None
     } else {

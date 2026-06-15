@@ -1,4 +1,6 @@
-use super::{validator, BinaryHandling, CompactionHint, ExecRequest, ExecResult, NextAction, OutputInfo};
+use super::{
+    validator, BinaryHandling, CompactionHint, ExecRequest, ExecResult, NextAction, OutputInfo,
+};
 use crate::classify::normalize::normalize_stderr;
 use crate::classify::{classify, taxonomy::RecoveryCode};
 use crate::compact;
@@ -11,7 +13,9 @@ use crate::recover::resolve::{resolve_suggestion, STDERR_PATTERN_MAX_BYTES};
 use crate::sandbox::overlay::OverlaySandbox;
 use crate::sandbox::paths;
 use crate::sandbox::scrubber;
-use crate::utils::{detect_binary, hash_command, normalize_command, shell_quote, summarize_binary, truncate_utf8};
+use crate::utils::{
+    detect_binary, hash_command, normalize_command, shell_quote, summarize_binary, truncate_utf8,
+};
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -287,13 +291,16 @@ impl Runner {
                                 },
                                 next_action: None,
                                 compaction_hint: None,
-                                platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
+                                platform: Some(
+                                    crate::memory::pattern::current_platform_tag().to_string(),
+                                ),
                                 warnings,
                                 auto_retry: None,
                             });
                         }
                         _ => {
-                            let summary_json = serde_json::to_string_pretty(&summary).unwrap_or_default();
+                            let summary_json =
+                                serde_json::to_string_pretty(&summary).unwrap_or_default();
                             (summary_json, Some(summary))
                         }
                     }
@@ -641,10 +648,15 @@ impl Runner {
 
         // Apply seccomp sandbox if configured
         if crate::config::get().sandbox.seccomp {
-            use crate::sandbox::seccomp;
-            if seccomp::is_seccomp_available() {
-                unsafe {
-                    cmd.pre_exec(|| seccomp::apply_seccomp_filter().map_err(std::io::Error::other));
+            #[cfg(unix)]
+            {
+                use crate::sandbox::seccomp;
+                if seccomp::is_seccomp_available() {
+                    unsafe {
+                        cmd.pre_exec(|| {
+                            seccomp::apply_seccomp_filter().map_err(std::io::Error::other)
+                        });
+                    }
                 }
             }
         }
@@ -722,12 +734,14 @@ mod tests {
         assert!(result.output_id.is_some());
         let count = runner.store.pattern_count().await.unwrap();
         assert_eq!(count, 1);
+        // Use the actual normalized stderr from the command output
+        // (cross-platform: shell error formats differ between bash, dash, etc.)
+        let normalized_cmd = normalize_command("nonexistent_command_xyz");
+        let normalized_err = normalize_stderr(&result.output.stderr);
+        assert!(!normalized_err.is_empty(), "stderr should have content");
         let pattern = runner
             .store
-            .find_pattern_exact(
-                &normalize_command("nonexistent_command_xyz"),
-                &normalize_stderr("sh: 1: nonexistent_command_xyz: not found"),
-            )
+            .find_pattern_exact(&normalized_cmd, &normalized_err)
             .await
             .unwrap()
             .unwrap();
