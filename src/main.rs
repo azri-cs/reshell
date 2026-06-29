@@ -51,6 +51,9 @@ async fn main() -> Result<()> {
                     env: env.into_iter().collect(),
                     retry,
                     binary_handling,
+                    call_ctx: None,
+                    raw_args_json: None,
+                    approve: false,
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);

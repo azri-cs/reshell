@@ -133,6 +133,20 @@ pub fn suggest(
             confidence: "high".to_string(),
             reason: "Command blocked by safety validator. Use a safer alternative.".to_string(),
         },
+        RecoveryCode::R28 => Suggestion {
+            action: "await_approval".to_string(),
+            command: None,
+            confidence: "high".to_string(),
+            reason: "Command flagged for human review. Re-issue with approve:true once approved."
+                .to_string(),
+        },
+        RecoveryCode::R29 => Suggestion {
+            action: "wait_or_raise_limit".to_string(),
+            command: None,
+            confidence: "high".to_string(),
+            reason: "Budget cap reached. The command was not executed; wait for the window to reset or raise the cap."
+                .to_string(),
+        },
         RecoveryCode::R30 => Suggestion {
             action: "escalate".to_string(),
             command: None,

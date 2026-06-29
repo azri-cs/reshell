@@ -33,6 +33,16 @@ pub struct ReshellConfig {
     pub scrubber: ScrubberConfig,
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// Per-session / hourly / daily shell-invocation budgets. All default to 0
+    /// (unlimited) so existing deployments see no behavior change until a cap
+    /// is set in `[budget]`.
+    #[serde(default)]
+    pub budget: BudgetConfig,
+    /// Human-in-the-loop review triggers for high-risk commands. Commands that
+    /// match return R28 (Approval Required) unless the caller passes
+    /// `approve: true`. Off by default (auto_approve = false).
+    #[serde(default)]
+    pub safety: SafetyConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +83,58 @@ pub struct SandboxConfig {
     pub allowed_env: Vec<String>,
     #[serde(default)]
     pub seccomp: bool,
+}
+
+/// Shell-invocation budget caps. Any value of `0` means "unlimited" for that
+/// dimension. Session caps live in-process (atomic counters in `ServerState`);
+/// hourly/daily caps persist across server restarts via the `budget_ledger`
+/// SQLite table. Output bytes are charged *after* execution (shell output size
+/// cannot be known in advance); invocation and wall-time caps are pre-checked.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BudgetConfig {
+    /// Max `rsh_exec` calls within a single server process. 0 = unlimited.
+    #[serde(default)]
+    pub max_invocations_per_session: u64,
+    /// Max total stdout bytes charged to the session. 0 = unlimited.
+    #[serde(default)]
+    pub max_output_bytes_per_session: u64,
+    /// Max total wall-clock seconds charged to the session. 0 = unlimited.
+    #[serde(default)]
+    pub max_wall_secs_per_session: u64,
+    /// Max `rsh_exec` calls per wall-clock hour (persisted). 0 = unlimited.
+    #[serde(default)]
+    pub max_invocations_per_hour: u64,
+    /// Max `rsh_exec` calls per calendar day (persisted). 0 = unlimited.
+    #[serde(default)]
+    pub max_invocations_per_day: u64,
+}
+
+impl BudgetConfig {
+    /// True when no cap is configured anywhere — lets the hot path skip the
+    /// check entirely (and skip DB reads for the ledger).
+    pub fn is_unlimited(&self) -> bool {
+        self.max_invocations_per_session == 0
+            && self.max_output_bytes_per_session == 0
+            && self.max_wall_secs_per_session == 0
+            && self.max_invocations_per_hour == 0
+            && self.max_invocations_per_day == 0
+    }
+}
+
+/// Human-in-the-loop review configuration. Commands flagged as high-risk
+/// (recursive deletes outside `/tmp`, `git push --force`, `docker system prune`,
+/// `sudo`-bearing, or matching `review_patterns`) return `R28` unless the
+/// caller passes `approve: true`. `auto_approve` skips review entirely.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SafetyConfig {
+    /// If true, all high-risk commands run without prompting for approval.
+    /// Defaults to false (review enabled).
+    #[serde(default)]
+    pub auto_approve: bool,
+    /// Extra regex patterns (matched against the raw command) that should
+    /// trigger review, on top of the built-in triggers.
+    #[serde(default)]
+    pub review_patterns: Vec<String>,
 }
 
 fn default_max_timeout() -> u64 {

@@ -2,6 +2,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::analyze;
+use crate::config;
 use crate::sandbox::allowlist;
 
 static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
@@ -61,6 +62,34 @@ static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     ]
 });
 
+/// High-risk-but-not-blocked patterns that should prompt for human review
+/// (R28 Approval Required) before executing, unless `approve: true` is passed.
+/// These are *dangerous* but legitimate operations that an agent shouldn't
+/// run silently — distinct from the hard-block `DANGEROUS_PATTERNS` above.
+static REVIEW_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+    vec![
+        // Recursive delete (rm with -r). Deleting /tmp and /var/tmp is treated
+        // as low-risk and excluded in `review_reason`; everything else (project
+        // dirs, home, etc.) is flagged for review.
+        (
+            Regex::new(r"(?i)\brm\s+(?:[^|;]*?\s)?-\w*r\w*").unwrap(),
+            "recursive_delete",
+        ),
+        // Force-push (rewrites shared history)
+        (
+            Regex::new(r"(?i)\bgit\s+push\s+(?:.*\s)?--force(?:-with-lease)?\b").unwrap(),
+            "force_push",
+        ),
+        // Docker system/volume prune (deletes more than expected)
+        (
+            Regex::new(r"(?i)\bdocker\s+(?:system|volume)\s+prune\b").unwrap(),
+            "docker_prune",
+        ),
+        // sudo-bearing commands (privilege escalation)
+        (Regex::new(r"(?i)\bsudo\b").unwrap(), "privilege_escalation"),
+    ]
+});
+
 /// Commands that invoke interpreters often used for indirection attacks
 const INTERPRETER_COMMANDS: &[&str] = &[
     "python", "python3", "python2", "perl", "ruby", "node", "lua", "php",
@@ -70,11 +99,36 @@ const INTERACTIVE_COMMANDS: &[&str] = &[
     "vim", "vi", "nano", "emacs", "less", "more", "man", "top", "htop",
 ];
 
-pub fn validate(command: &str) -> Result<(), String> {
+/// Outcome of validating a command. `Ok(ValidationOutcome { risk_tier })`
+/// means the command is permitted to run (subject to the risk tier);
+/// `Err(String)` means it is hard-blocked (R27).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationOutcome {
+    pub risk_tier: RiskTier,
+    /// When `risk_tier == NeedsReview`, the trigger that flagged the command
+    /// (e.g. "recursive_delete", "force_push"). `None` when `Allow`.
+    pub risk_factor: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RiskTier {
+    /// Command may run without any special handling.
+    #[default]
+    Allow,
+    /// High-risk command; the caller should require explicit `approve: true`
+    /// before executing. If already approved, treat as `Allow`.
+    NeedsReview,
+}
+
+/// Validate a command, returning either a hard-block error or an outcome
+/// carrying the command's risk tier. Backwards compatible with the previous
+/// `Result<(), String>` shape: callers using `.is_ok()` / `.is_err()` are
+/// unaffected.
+pub fn validate(command: &str) -> Result<ValidationOutcome, String> {
     // 0. Allowlist mode — if enabled, skip all other checks
     allowlist::is_command_allowed(command)?;
 
-    // 1. Regex-based dangerous pattern detection
+    // 1. Regex-based dangerous pattern detection (hard block → Err)
     for re in DANGEROUS_PATTERNS.iter() {
         if re.is_match(command) {
             return Err(format!(
@@ -131,7 +185,47 @@ pub fn validate(command: &str) -> Result<(), String> {
         return Err("Unmatched quotes detected in command".to_string());
     }
 
-    Ok(())
+    // 2. Risk-tier check: not blocked, but high-risk enough to need approval.
+    //    Skipped entirely when [safety] auto_approve = true.
+    let safety = &config::get().safety;
+    if !safety.auto_approve {
+        if let Some(factor) = review_reason(command, safety) {
+            return Ok(ValidationOutcome {
+                risk_tier: RiskTier::NeedsReview,
+                risk_factor: Some(factor),
+            });
+        }
+    }
+
+    Ok(ValidationOutcome {
+        risk_tier: RiskTier::Allow,
+        risk_factor: None,
+    })
+}
+
+/// Return the reason string if `command` matches a review trigger (built-in
+/// or user-configured), else `None`.
+fn review_reason(command: &str, safety: &config::SafetyConfig) -> Option<&'static str> {
+    for (re, reason) in REVIEW_PATTERNS.iter() {
+        if re.is_match(command) {
+            // `rm -r` is low-risk when targeting /tmp or /var/tmp by convention.
+            if *reason == "recursive_delete"
+                && (command.contains("/tmp") || command.contains("/var/tmp"))
+            {
+                continue;
+            }
+            return Some(reason);
+        }
+    }
+    // User-configured patterns matched against the raw command.
+    for pat in &safety.review_patterns {
+        if let Ok(re) = Regex::new(pat) {
+            if re.is_match(command) {
+                return Some("user_pattern");
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -232,5 +326,55 @@ mod tests {
         assert!(validate("npm install").is_ok());
         assert!(validate("pip install requests").is_ok());
         assert!(validate("docker build -t myapp .").is_ok());
+    }
+
+    #[test]
+    fn sudo_bearing_command_needs_review() {
+        let outcome = validate("sudo apt update").unwrap();
+        assert_eq!(outcome.risk_tier, RiskTier::NeedsReview);
+        assert_eq!(outcome.risk_factor, Some("privilege_escalation"));
+    }
+
+    #[test]
+    fn git_force_push_needs_review() {
+        let outcome = validate("git push --force origin main").unwrap();
+        assert_eq!(outcome.risk_tier, RiskTier::NeedsReview);
+        assert_eq!(outcome.risk_factor, Some("force_push"));
+    }
+
+    #[test]
+    fn docker_prune_needs_review() {
+        let outcome = validate("docker system prune -af").unwrap();
+        assert_eq!(outcome.risk_tier, RiskTier::NeedsReview);
+        assert_eq!(outcome.risk_factor, Some("docker_prune"));
+    }
+
+    #[test]
+    fn rm_recursive_outside_tmp_needs_review() {
+        // Deleting project contents is legitimate but risky — flag for review.
+        let outcome = validate("rm -rf ./build").unwrap();
+        assert_eq!(outcome.risk_tier, RiskTier::NeedsReview);
+        assert_eq!(outcome.risk_factor, Some("recursive_delete"));
+    }
+
+    #[test]
+    fn safe_commands_are_allowed_tier() {
+        // Sanity: ordinary commands must not trigger review.
+        for cmd in ["ls -la", "echo hi", "git status", "cargo build"] {
+            let outcome = validate(cmd).unwrap();
+            assert_eq!(
+                outcome.risk_tier,
+                RiskTier::Allow,
+                "cmd should be allowed: {}",
+                cmd
+            );
+            assert_eq!(outcome.risk_factor, None);
+        }
+    }
+
+    #[test]
+    fn rm_recursive_to_root_is_blocked_not_reviewed() {
+        // rm -rf / is a hard block (R27), never a review.
+        assert!(validate("rm -rf /").is_err());
     }
 }

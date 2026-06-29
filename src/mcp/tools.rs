@@ -6,24 +6,25 @@ use tokio::sync::Mutex;
 use crate::classify::taxonomy::RecoveryCode;
 use crate::compact::view::{render_view, CompactView};
 use crate::env::Detector;
-use crate::exec::{runner::Runner, ExecRequest};
+use crate::exec::{runner::Runner, ExecRequest, ExecResult, NextAction, OutputInfo};
 use crate::memory::Store;
 use crate::recover::resolve::resolve_suggestion;
 use crate::sandbox::paths;
 
-use super::router::ServerState;
+use super::router::{CallContext, ServerState};
 
 pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "rsh_exec",
-            "description": "Execute ANY shell command. USE THIS INSTEAD OF RAW BASH for every command. Secrets are auto-redacted. On failure, high-confidence fixes (missing tools) are auto-applied (check auto_retry field). Failures return a concrete fix command in suggestion.command. Successes are compacted. Call rsh_feedback after trying a fix to build pattern memory.",
+            "description": "Execute ANY shell command. USE THIS INSTEAD OF RAW BASH for every command. Secrets are auto-redacted. On failure, high-confidence fixes (missing tools) are auto-applied (check auto_retry field). Failures return a concrete fix command in suggestion.command. Successes are compacted. Call rsh_feedback after trying a fix to build pattern memory. If a command returns recovery_code R28 (Approval Required), re-issue the SAME command with approve:true after a human approves.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "Shell command to execute (required)" },
                     "cwd": { "type": "string", "description": "Working directory (default: current directory)" },
-                    "timeout": { "type": "integer", "default": 120, "description": "Timeout in seconds (max 600)" }
+                    "timeout": { "type": "integer", "default": 120, "description": "Timeout in seconds (max 600)" },
+                    "approve": { "type": "boolean", "default": false, "description": "Set to true to execute a command previously returned as R28 (Approval Required), after human review." }
                 },
                 "required": ["command"]
             }
@@ -123,14 +124,18 @@ pub fn list_tools() -> Vec<Value> {
 
 /// Handle a tool call. Returns `(data_value, is_error)` where `data_value` is the
 /// tool-specific result payload (NOT wrapped in a ToolResponse envelope).
+///
+/// `call_ctx` carries the session id (per server process) and the JSON-RPC
+/// request id (per call) so every audit row is traceable end-to-end.
 pub(crate) async fn handle_tool_call(
     name: &str,
     arguments: Value,
     state: &Arc<Mutex<ServerState>>,
+    call_ctx: CallContext,
 ) -> (Value, bool) {
     match name {
         "rsh_exec" => {
-            let wrapper = match serde_json::from_value::<ExecRequestWrapper>(arguments) {
+            let wrapper = match serde_json::from_value::<ExecRequestWrapper>(arguments.clone()) {
                 Ok(w) => w,
                 Err(e) => {
                     return (
@@ -139,6 +144,10 @@ pub(crate) async fn handle_tool_call(
                     );
                 }
             };
+            // Scrub the raw arguments before persisting to the audit log so no
+            // secret in env/args is ever written to disk. The scrubber is a no-op
+            // for short, low-entropy strings, so this is cheap on the happy path.
+            let scrubbed_args = crate::sandbox::scrubber::scrub_secrets(&arguments.to_string());
             let req = ExecRequest {
                 command: wrapper.command,
                 cwd: wrapper.cwd,
@@ -146,6 +155,12 @@ pub(crate) async fn handle_tool_call(
                 env: wrapper.env.unwrap_or_default(),
                 retry: wrapper.retry.unwrap_or(true),
                 binary_handling: wrapper.binary_handling,
+                call_ctx: Some(crate::exec::ExecCallContext {
+                    session_id: call_ctx.session_id.clone(),
+                    request_id: call_ctx.request_id.clone(),
+                }),
+                raw_args_json: Some(scrubbed_args),
+                approve: wrapper.approve.unwrap_or(false),
             };
             let metrics = {
                 let s = state.lock().await;
@@ -161,8 +176,102 @@ pub(crate) async fn handle_tool_call(
                     );
                 }
             };
-            let runner = Runner::with_store_and_metrics(store, metrics);
-            match runner.run(&req).await {
+
+            // ── Budget guardrail (pre-exec check) ──────────────────────────
+            // Invocations and wall-time are pre-checkable; output bytes are
+            // charged after execution (size is unknown in advance).
+            let budget_cfg = crate::config::get().budget.clone();
+            if !budget_cfg.is_unlimited() {
+                // Session-scoped caps (in-process atomics in shared Router state).
+                let session_decision = {
+                    let s = state.lock().await;
+                    crate::budget::check_session(&s.budget, &budget_cfg)
+                };
+                if let Some(r29) = budget_refusal(&session_decision, &req, &call_ctx, &store).await
+                {
+                    return (json!(r29), true);
+                }
+
+                // Persistent hourly/daily caps (SQLite ledger).
+                if budget_cfg.max_invocations_per_hour > 0 || budget_cfg.max_invocations_per_day > 0
+                {
+                    let windows = crate::budget::current_windows(now_secs());
+                    let mut blocked = None;
+                    for w in windows {
+                        let usage = store
+                            .budget_window_usage(w.bucket, w.window_key)
+                            .await
+                            .unwrap_or_default();
+                        let limit = if w.bucket == "hourly" {
+                            budget_cfg.max_invocations_per_hour
+                        } else {
+                            budget_cfg.max_invocations_per_day
+                        } as i64;
+                        if limit > 0 && usage.invocations >= limit {
+                            blocked = Some((w.bucket, usage.invocations as u64, limit as u64));
+                            break;
+                        }
+                    }
+                    if let Some((bucket, used, limit)) = blocked {
+                        let code = "R29";
+                        let _ = audit_tool_call(
+                            &store,
+                            &call_ctx,
+                            "rsh_exec",
+                            &req.command,
+                            &format!("{{\"budget\":\"{}\"}}", bucket),
+                            -1,
+                            code,
+                        )
+                        .await;
+                        return (
+                            json!(budget_exhausted_result(&req.command, bucket, used, limit,)),
+                            true,
+                        );
+                    }
+                }
+            }
+
+            // Bump the session invocation counter now (the call is going ahead).
+            let budget_started = std::time::Instant::now();
+            if !budget_cfg.is_unlimited() {
+                let s = state.lock().await;
+                s.budget.inc_invocation();
+            }
+
+            let runner = Runner::with_store_and_metrics(store.clone(), metrics);
+            let run_result = runner.run(&req).await;
+
+            // ── Budget charge (post-exec): actual stdout bytes + wall time ──
+            if !budget_cfg.is_unlimited() {
+                let wall_secs = budget_started.elapsed().as_secs();
+                let output_bytes = match &run_result {
+                    Ok(r) => r.output.stdout.len() as u64,
+                    Err(_) => 0,
+                };
+                {
+                    let s = state.lock().await;
+                    s.budget.add_output_bytes(output_bytes);
+                    s.budget.add_wall_secs(wall_secs);
+                }
+                // Charge the persistent daily window (hourly invocation caps are
+                // pre-checked above; we still record bytes/secs on the daily window
+                // for completeness and future daily byte caps).
+                let windows = crate::budget::current_windows(now_secs());
+                if let Some(daily) = windows.iter().find(|w| w.bucket == "daily") {
+                    let _ = store
+                        .record_budget_charge(
+                            daily.bucket,
+                            daily.window_key,
+                            1,
+                            output_bytes as i64,
+                            wall_secs as i64,
+                        )
+                        .await;
+                }
+            }
+
+            match run_result {
                 Ok(result) => {
                     let is_error = result.status == "failed";
                     (json!(result), is_error)
@@ -230,6 +339,8 @@ pub(crate) async fn handle_tool_call(
                         "R25": "Environment Mismatch — use POSIX-compatible syntax. rsh will auto-retry with fallback shell.",
                         "R26": "Output Overflow — use rsh_compact to get a compacted view.",
                         "R27": "Blocked / Safety Violation — command was blocked by the safety validator.",
+                        "R28": "Approval Required — high-risk command; re-issue with approve:true after a human approves.",
+                        "R29": "Budget Exhausted — a configured call/byte/time cap was hit; wait for the window to reset.",
                         "R30": "Fatal/Unknown — requires human escalation."
                     }
                 },
@@ -326,14 +437,27 @@ pub(crate) async fn handle_tool_call(
             };
             let suggestion = resolved.suggestion;
 
-            // Log telemetry
-            {
+            // Log telemetry: a recovery_attempts row (historical) plus a full
+            // audit row so the call appears in rsh_stats' recent slice.
+            let store_clone = {
                 let s = state.lock().await;
-                let _ = s
-                    .store
-                    .log_recovery_attempt(&recovery_code, &original_command, &suggestion.action)
-                    .await;
-            }
+                s.store.clone()
+            };
+            let _ = store_clone
+                .log_recovery_attempt(&recovery_code, &original_command, &suggestion.action)
+                .await;
+            let _ = audit_tool_call(
+                &store_clone,
+                &call_ctx,
+                "rsh_recover",
+                &original_command,
+                json!({ "recovery_code": recovery_code })
+                    .to_string()
+                    .as_str(),
+                0,
+                &recovery_code,
+            )
+            .await;
 
             (json!(suggestion), false)
         }
@@ -487,10 +611,24 @@ pub(crate) async fn handle_tool_call(
                 )
                 .await
             {
-                Ok(()) => (
-                    json!({ "status": "recorded", "success": req.success, "fix_command": req.fix_command }),
-                    false,
-                ),
+                Ok(()) => {
+                    let _ = audit_tool_call(
+                        &store,
+                        &call_ctx,
+                        "rsh_feedback",
+                        &req.original_command,
+                        json!({ "fix_command": req.fix_command, "success": req.success })
+                            .to_string()
+                            .as_str(),
+                        0,
+                        "R10",
+                    )
+                    .await;
+                    (
+                        json!({ "status": "recorded", "success": req.success, "fix_command": req.fix_command }),
+                        false,
+                    )
+                }
                 Err(e) => (
                     json!({ "error": format!("Failed to record feedback: {}", e) }),
                     true,
@@ -508,6 +646,23 @@ pub(crate) async fn handle_tool_call(
             let avg_success = store.average_fix_success_rate().await.unwrap_or(0.0);
             let by_code = store.pattern_counts_by_code().await.unwrap_or_default();
             let total_patterns = store.pattern_count().await.unwrap_or(0);
+            // Recent audit slice: the last 10 invocations across the tool surface,
+            // for tracing what the agent has been doing (MCP "trace and improve").
+            let recent = store.recent_audit_entries(10).await.unwrap_or_default();
+            let recent_json: Vec<Value> = recent
+                .into_iter()
+                .map(|e| {
+                    json!({
+                        "at": e.executed_at,
+                        "tool": e.tool,
+                        "session_id": e.session_id,
+                        "request_id": e.request_id,
+                        "recovery_code": e.recovery_code,
+                        "exit_code": e.exit_code,
+                        "command": e.raw_command.unwrap_or(e.command_template),
+                    })
+                })
+                .collect();
 
             let stats = json!({
                 "metrics": {
@@ -529,7 +684,8 @@ pub(crate) async fn handle_tool_call(
                 "recovery_attempts": {
                     "total": recovery_counts.iter().map(|(_, c)| c).sum::<i64>(),
                     "by_code": recovery_counts
-                }
+                },
+                "recent_invocations": recent_json
             });
             (stats, false)
         }
@@ -554,13 +710,32 @@ pub(crate) async fn handle_tool_call(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             match paths::validate_and_create_file(path, content) {
-                Ok(resolved_path) => (
-                    json!({
-                        "path": resolved_path.to_string_lossy(),
-                        "bytes_written": content.len(),
-                    }),
-                    false,
-                ),
+                Ok(resolved_path) => {
+                    // Audit the write so the tool-call trace covers mutating tools.
+                    let store = {
+                        let s = state.lock().await;
+                        s.store.clone()
+                    };
+                    let _ = audit_tool_call(
+                        &store,
+                        &call_ctx,
+                        "rsh_write_file",
+                        path,
+                        json!({ "path": path, "bytes": content.len() })
+                            .to_string()
+                            .as_str(),
+                        0,
+                        "R10",
+                    )
+                    .await;
+                    (
+                        json!({
+                            "path": resolved_path.to_string_lossy(),
+                            "bytes_written": content.len(),
+                        }),
+                        false,
+                    )
+                }
                 Err(e) => (json!({"error": format!("File write blocked: {}", e)}), true),
             }
         }
@@ -579,7 +754,119 @@ fn parse_recovery_code(code: &str) -> RecoveryCode {
         "R25" => RecoveryCode::R25,
         "R26" => RecoveryCode::R26,
         "R27" => RecoveryCode::R27,
+        "R28" => RecoveryCode::R28,
+        "R29" => RecoveryCode::R29,
         _ => RecoveryCode::R30,
+    }
+}
+
+/// Write a best-effort audit row for a non-`rsh_exec` tool call so the audit
+/// log covers the whole tool surface, not just command execution. Failures are
+/// swallowed (audit is telemetry, never on the request's critical path).
+async fn audit_tool_call(
+    store: &crate::memory::Store,
+    call_ctx: &CallContext,
+    tool: &str,
+    raw_command: &str,
+    args_json: &str,
+    exit_code: i32,
+    recovery_code: &str,
+) {
+    let normalized = crate::utils::normalize_command(raw_command);
+    let hash = crate::utils::hash_command(&normalized);
+    let _ = store
+        .log_audit(crate::memory::AuditRecord {
+            command_hash: &hash,
+            command_template: &normalized,
+            cwd: None,
+            exit_code,
+            recovery_code,
+            validation_passed: true,
+            session_id: Some(&call_ctx.session_id),
+            request_id: call_ctx.request_id_str(),
+            tool: Some(tool),
+            raw_command: Some(raw_command),
+            args_json: Some(args_json),
+            wall_ms: None,
+        })
+        .await;
+}
+
+/// Current wall-clock time in seconds since the Unix epoch, for budget windows.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// If the session-scoped budget decision is Exhausted, write an R29 audit row
+/// and return the structured refusal result for the caller to return.
+async fn budget_refusal(
+    decision: &crate::budget::BudgetDecision,
+    req: &ExecRequest,
+    call_ctx: &CallContext,
+    store: &crate::memory::Store,
+) -> Option<ExecResult> {
+    match decision {
+        crate::budget::BudgetDecision::Allowed => None,
+        crate::budget::BudgetDecision::Exhausted { cap, used, limit } => {
+            let _ = audit_tool_call(
+                store,
+                call_ctx,
+                "rsh_exec",
+                &req.command,
+                &format!("{{\"budget\":\"{}\"}}", cap),
+                -1,
+                "R29",
+            )
+            .await;
+            Some(budget_exhausted_result(&req.command, cap, *used, *limit))
+        }
+    }
+}
+
+/// Build the structured R29 (Budget Exhausted) result returned to the agent.
+fn budget_exhausted_result(command: &str, cap: &str, used: u64, limit: u64) -> ExecResult {
+    ExecResult {
+        status: "failed".to_string(),
+        recovery_code: "R29".to_string(),
+        recovery_class: RecoveryCode::R29.class_name().to_string(),
+        original_command: command.to_string(),
+        execution_id: uuid::Uuid::new_v4().to_string(),
+        output_id: None,
+        suggestion: serde_json::json!({
+            "action": "wait_or_raise_limit",
+            "confidence": "high",
+            "reason": format!(
+                "Budget cap '{}' reached ({} of {}). Wait for the window to reset or raise the cap in [budget].",
+                cap, used, limit
+            )
+        }),
+        output: OutputInfo {
+            stdout: String::new(),
+            stderr: format!(
+                "rsh: budget exhausted: cap '{}' at {}/{}",
+                cap, used, limit
+            ),
+            exit_code: -1,
+            truncated: false,
+            binary_summary: None,
+        },
+        next_action: Some(NextAction {
+            tool: "rsh_recover".to_string(),
+            params: serde_json::json!({
+                "recovery_code": "R29",
+                "original_command": command,
+                "context": format!("budget cap {} reached", cap),
+                "stderr": "",
+            }),
+            reason: "Budget cap reached. The command was not executed. Wait for the window to reset or ask the operator to raise the cap.".to_string(),
+        }),
+        compaction_hint: None,
+        platform: None,
+        warnings: vec![],
+        auto_retry: None,
     }
 }
 
@@ -592,6 +879,10 @@ struct ExecRequestWrapper {
     retry: Option<bool>,
     #[serde(default)]
     binary_handling: crate::exec::BinaryHandling,
+    /// Human approval for a high-risk command (R28). Forwarded by the agent
+    /// after the host's permission UI confirms the command is safe to run.
+    #[serde(default)]
+    approve: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]

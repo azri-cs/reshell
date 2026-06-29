@@ -607,6 +607,205 @@ async fn test_mcp_feedback_and_stats() {
 }
 
 #[tokio::test]
+async fn test_mcp_audit_session_id_and_recent_invocations() {
+    // One home dir shared across two server processes — the audit rows they
+    // write must carry distinct session ids (one per process) so calls are
+    // traceable to the server that made them.
+    let home = unique_home_dir();
+
+    // First server: run an exec, then read rsh_stats to get the session id + recent slice.
+    let (mut child1, mut stdin1, mut reader1) = spawn_mcp_server(&home).await;
+    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo audit_session_one"}}});
+    write_frame(&mut stdin1, &exec).await;
+    let _ = read_frame(&mut reader1).await.unwrap();
+
+    let stats = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rsh_stats","arguments":{}}});
+    write_frame(&mut stdin1, &stats).await;
+    let resp = read_frame(&mut reader1).await.unwrap();
+    let st: Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let recent = st["recent_invocations"]
+        .as_array()
+        .expect("recent_invocations present");
+    assert!(
+        !recent.is_empty(),
+        "recent_invocations should include the exec"
+    );
+    let session1 = recent
+        .iter()
+        .find(|e| e["command"].as_str() == Some("echo audit_session_one"))
+        .map(|e| e["session_id"].as_str().unwrap().to_string())
+        .expect("session1 exec should appear in recent invocations");
+    assert!(!session1.is_empty());
+    // Every exec row is tagged rsh_exec / R10.
+    assert!(recent.iter().any(|e| e["tool"] == "rsh_exec"));
+    assert!(recent.iter().any(|e| e["recovery_code"] == "R10"));
+    let _ = child1.kill().await;
+
+    // Second server process at the same home — must get a different session id.
+    let (mut child2, mut stdin2, mut reader2) = spawn_mcp_server(&home).await;
+    let exec2 = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo audit_session_two"}}});
+    write_frame(&mut stdin2, &exec2).await;
+    let _ = read_frame(&mut reader2).await.unwrap();
+
+    let stats2 = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rsh_stats","arguments":{}}});
+    write_frame(&mut stdin2, &stats2).await;
+    let resp2 = read_frame(&mut reader2).await.unwrap();
+    let st2: Value =
+        serde_json::from_str(resp2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let recent2 = st2["recent_invocations"].as_array().unwrap();
+    // Find the row belonging to session2's exec by its command (the shared DB
+    // also contains session1's rows, and timestamp ties make index order
+    // unreliable within the same second).
+    let session2 = recent2
+        .iter()
+        .find(|e| e["command"].as_str() == Some("echo audit_session_two"))
+        .map(|e| e["session_id"].as_str().unwrap().to_string())
+        .expect("session2 exec should appear in recent invocations");
+    assert_ne!(
+        session1, session2,
+        "each server process gets a unique session id"
+    );
+    let _ = child2.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_budget_session_cap_refuses_call() {
+    // Configure a 2-call session cap and verify the 3rd call returns R29.
+    let home = unique_home_dir();
+    let cfg_dir = home.join(".reshell");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        "[budget]\nmax_invocations_per_session = 2\n",
+    )
+    .unwrap();
+
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+
+    // Two calls succeed.
+    for _ in 0..2 {
+        let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo ok"}}});
+        write_frame(&mut stdin, &exec).await;
+        let resp = read_frame(&mut reader).await.unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let r: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(r["status"], "success", "first two calls should succeed");
+    }
+
+    // Third call is refused with R29 (Budget Exhausted).
+    let exec = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo blocked"}}});
+    write_frame(&mut stdin, &exec).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let r: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(r["status"], "failed");
+    assert_eq!(r["recovery_code"], "R29");
+    assert!(r["suggestion"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("max_invocations_per_session"));
+    // The refused call must not have executed the command.
+    assert!(r["output"]["stdout"].as_str().unwrap().is_empty());
+
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_budget_unlimited_by_default() {
+    // With no [budget] config, no cap applies — many calls all succeed.
+    let home = unique_home_dir();
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+    for _ in 0..15 {
+        let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo ok"}}});
+        write_frame(&mut stdin, &exec).await;
+        let resp = read_frame(&mut reader).await.unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let r: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(r["status"], "success");
+    }
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_high_risk_command_needs_approval_then_runs() {
+    // A high-risk command (git push --force) returns R28 without approve:true.
+    // With approve:true it is allowed past the gate (it then fails as a normal
+    // git error, not R28 — proving approval worked).
+    let home = unique_home_dir();
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+
+    // 1. Without approval → R28, status needs_approval, command not executed.
+    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"git push --force origin main"}}});
+    write_frame(&mut stdin, &exec).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let r: Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(r["status"], "needs_approval");
+    assert_eq!(r["recovery_code"], "R28");
+    assert_eq!(r["recovery_class"], "Approval Required");
+    assert_eq!(r["next_action"]["params"]["approve"], true);
+    assert!(r["output"]["stdout"].as_str().unwrap().is_empty());
+
+    // 2. With approve:true → past the gate. It executes and fails as a normal
+    //    git error (not a git repo), so recovery_code must NOT be R28.
+    let exec = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"git push --force origin main", "approve": true}}});
+    write_frame(&mut stdin, &exec).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let r2: Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_ne!(
+        r2["recovery_code"], "R28",
+        "approve:true must bypass the R28 gate"
+    );
+    assert_ne!(r2["status"], "needs_approval");
+
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_sudo_triggers_review() {
+    // sudo-bearing commands are flagged for review (R28) by default.
+    let home = unique_home_dir();
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"sudo ls /root"}}});
+    write_frame(&mut stdin, &exec).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let r: Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(r["status"], "needs_approval");
+    assert_eq!(r["recovery_code"], "R28");
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn test_mcp_safety_auto_approve_skips_review() {
+    // With [safety] auto_approve = true, high-risk commands run without R28.
+    let home = unique_home_dir();
+    let cfg_dir = home.join(".reshell");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        "[safety]\nauto_approve = true\n",
+    )
+    .unwrap();
+    let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;
+    // sudo echo is auto-approved, then executes. It may fail on password, but
+    // it must NOT return R28 (the gate is skipped entirely).
+    let exec = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"sudo echo hi"}}});
+    write_frame(&mut stdin, &exec).await;
+    let resp = read_frame(&mut reader).await.unwrap();
+    let r: Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_ne!(
+        r["recovery_code"], "R28",
+        "auto_approve must skip the R28 gate"
+    );
+    assert_ne!(r["status"], "needs_approval");
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
 async fn test_mcp_resources_list_and_read() {
     let home = unique_home_dir();
     let (mut child, mut stdin, mut reader) = spawn_mcp_server(&home).await;

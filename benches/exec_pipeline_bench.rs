@@ -20,6 +20,9 @@ fn bench_exec_simple(c: &mut Criterion) {
                 env: HashMap::new(),
                 retry: false,
                 binary_handling: BinaryHandling::Summary,
+                call_ctx: None,
+                raw_args_json: None,
+                approve: false,
             };
             let result = rt.block_on(runner.run(black_box(&request)));
             let _ = black_box(result);

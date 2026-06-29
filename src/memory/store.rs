@@ -129,6 +129,30 @@ impl Store {
             )",
             [],
         )?;
+        // Migrations: extend audit_log with tracing columns for full-argument
+        // correlation (added incrementally so older DBs upgrade in place).
+        // All nullable so rows written by older code still deserialize.
+        for col in [
+            "session_id TEXT",
+            "request_id TEXT",
+            "tool TEXT",
+            "raw_command TEXT",
+            "args_json TEXT",
+            "wall_ms INTEGER",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE audit_log ADD COLUMN {}", col), []);
+        }
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS budget_ledger (
+                bucket TEXT NOT NULL,
+                window_key TEXT NOT NULL,
+                invocations INTEGER NOT NULL DEFAULT 0,
+                bytes INTEGER NOT NULL DEFAULT 0,
+                secs INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (bucket, window_key)
+            )",
+            [],
+        )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -641,7 +665,51 @@ impl Store {
         .await
     }
 
-    /// Log a command execution for audit purposes.
+    /// Log a command execution for audit purposes (full-argument, correlation-ID form).
+    /// Persists the raw command, scrubbed args JSON, session/request ids, tool name,
+    /// and wall-clock duration so every invocation is traceable end-to-end.
+    pub async fn log_audit(&self, record: AuditRecord<'_>) -> anyhow::Result<()> {
+        // String-ify borrows so they can move into the spawn_blocking closure.
+        let command_hash = record.command_hash.to_string();
+        let command_template = record.command_template.to_string();
+        let cwd = record.cwd.unwrap_or("").to_string();
+        let exit_code = record.exit_code;
+        let recovery_code = record.recovery_code.to_string();
+        let validation_passed = record.validation_passed;
+        let session_id = record.session_id.map(|s| s.to_string());
+        let request_id = record.request_id.map(|s| s.to_string());
+        let tool = record.tool.map(|s| s.to_string());
+        let raw_command = record.raw_command.map(|s| s.to_string());
+        let args_json = record.args_json.map(|s| s.to_string());
+        let wall_ms = record.wall_ms;
+        self.run_db_write(move |conn| {
+            conn.execute(
+                "INSERT INTO audit_log
+                    (command_hash, command_template, cwd, exit_code, recovery_code, validation_passed,
+                     session_id, request_id, tool, raw_command, args_json, wall_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    command_hash,
+                    command_template,
+                    cwd,
+                    exit_code,
+                    recovery_code,
+                    validation_passed,
+                    session_id,
+                    request_id,
+                    tool,
+                    raw_command,
+                    args_json,
+                    wall_ms,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Backwards-compatible thin wrapper around [`log_audit`](Self::log_audit)
+    /// for callers that only have the legacy fields. Prefer `log_audit` directly.
     pub async fn log_audit_entry(
         &self,
         command_hash: &str,
@@ -651,24 +719,14 @@ impl Store {
         recovery_code: &str,
         validation_passed: bool,
     ) -> anyhow::Result<()> {
-        let command_hash = command_hash.to_string();
-        let command_template = command_template.to_string();
-        let cwd = cwd.unwrap_or("").to_string();
-        let recovery_code = recovery_code.to_string();
-        self.run_db_write(move |conn| {
-            conn.execute(
-                "INSERT INTO audit_log (command_hash, command_template, cwd, exit_code, recovery_code, validation_passed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    command_hash,
-                    command_template,
-                    cwd,
-                    exit_code,
-                    recovery_code,
-                    validation_passed,
-                ],
-            )?;
-            Ok(())
+        self.log_audit(AuditRecord {
+            command_hash,
+            command_template,
+            cwd,
+            exit_code,
+            recovery_code,
+            validation_passed,
+            ..Default::default()
         })
         .await
     }
@@ -741,7 +799,8 @@ impl Store {
         self.run_db(move |conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT id, command_hash, command_template, cwd, exit_code, recovery_code,
-                        validation_passed, executed_at
+                        validation_passed, executed_at,
+                        session_id, request_id, tool, raw_command, args_json, wall_ms
                  FROM audit_log
                  ORDER BY executed_at DESC
                  LIMIT ?1",
@@ -758,9 +817,72 @@ impl Store {
                     recovery_code: row.get(5)?,
                     validation_passed: row.get(6)?,
                     executed_at: row.get(7)?,
+                    session_id: row.get(8).ok().flatten(),
+                    request_id: row.get(9).ok().flatten(),
+                    tool: row.get(10).ok().flatten(),
+                    raw_command: row.get(11).ok().flatten(),
+                    args_json: row.get(12).ok().flatten(),
+                    wall_ms: row.get(13).ok().flatten(),
                 });
             }
             Ok(entries)
+        })
+        .await
+    }
+
+    /// Read the cumulative usage for a budget window ("hourly" or "daily")
+    /// identified by its window key (e.g. "2026-06-30T14" or "2026-06-30").
+    /// Returns zeros if no charges have been recorded for that window yet.
+    pub async fn budget_window_usage(
+        &self,
+        bucket: &str,
+        window_key: &str,
+    ) -> anyhow::Result<BudgetUsage> {
+        let bucket = bucket.to_string();
+        let window_key = window_key.to_string();
+        self.run_db(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT invocations, bytes, secs FROM budget_ledger
+                  WHERE bucket = ?1 AND window_key = ?2",
+            )?;
+            let mut rows = stmt.query(params![bucket, window_key])?;
+            if let Some(row) = rows.next()? {
+                Ok(BudgetUsage {
+                    invocations: row.get(0)?,
+                    bytes: row.get(1)?,
+                    secs: row.get(2)?,
+                })
+            } else {
+                Ok(BudgetUsage::default())
+            }
+        })
+        .await
+    }
+
+    /// Atomically add a charge (invocations / bytes / secs) to a budget window,
+    /// inserting the row if it does not yet exist. Called once per `rsh_exec`
+    /// after execution with the actual stdout bytes and measured wall time.
+    pub async fn record_budget_charge(
+        &self,
+        bucket: &str,
+        window_key: &str,
+        invocations: i64,
+        bytes: i64,
+        secs: i64,
+    ) -> anyhow::Result<()> {
+        let bucket = bucket.to_string();
+        let window_key = window_key.to_string();
+        self.run_db_write(move |conn| {
+            conn.execute(
+                "INSERT INTO budget_ledger (bucket, window_key, invocations, bytes, secs)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(bucket, window_key) DO UPDATE SET
+                    invocations = invocations + ?3,
+                    bytes = bytes + ?4,
+                    secs = secs + ?5",
+                params![bucket, window_key, invocations, bytes, secs],
+            )?;
+            Ok(())
         })
         .await
     }
@@ -819,6 +941,42 @@ pub struct AuditEntry {
     pub recovery_code: String,
     pub validation_passed: bool,
     pub executed_at: String,
+    // Tracing columns (nullable; absent on rows from older DBs).
+    pub session_id: Option<String>,
+    pub request_id: Option<String>,
+    pub tool: Option<String>,
+    pub raw_command: Option<String>,
+    pub args_json: Option<String>,
+    pub wall_ms: Option<i64>,
+}
+
+/// Full audit record. Only `command_hash`, `command_template`, and
+/// `recovery_code` are required; everything else is optional context.
+/// Callers should pass `args_json` through `scrubber::scrub_secrets` first
+/// so secrets are never persisted.
+#[derive(Debug, Clone, Default)]
+pub struct AuditRecord<'a> {
+    pub command_hash: &'a str,
+    pub command_template: &'a str,
+    pub cwd: Option<&'a str>,
+    pub exit_code: i32,
+    pub recovery_code: &'a str,
+    pub validation_passed: bool,
+    pub session_id: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+    pub tool: Option<&'a str>,
+    pub raw_command: Option<&'a str>,
+    pub args_json: Option<&'a str>,
+    pub wall_ms: Option<i64>,
+}
+
+/// Cumulative usage within one budget window (hourly or daily). Zeros when no
+/// charge has been recorded for that window yet.
+#[derive(Debug, Clone, Default)]
+pub struct BudgetUsage {
+    pub invocations: i64,
+    pub bytes: i64,
+    pub secs: i64,
 }
 
 #[cfg(test)]
@@ -937,6 +1095,94 @@ mod tests {
         let entries = store.recent_audit_entries(10).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].recovery_code, "R10");
+    }
+
+    #[tokio::test]
+    async fn log_audit_full_record_persists_tracing_columns() {
+        let (store, _dir) = test_store();
+        store
+            .log_audit(AuditRecord {
+                command_hash: "h1",
+                command_template: "echo hi",
+                cwd: Some("/tmp"),
+                exit_code: 0,
+                recovery_code: "R10",
+                validation_passed: true,
+                session_id: Some("sess-abc"),
+                request_id: Some("42"),
+                tool: Some("rsh_exec"),
+                raw_command: Some("echo hi"),
+                args_json: Some(r#"{"command":"echo hi"}"#),
+                wall_ms: Some(7),
+            })
+            .await
+            .unwrap();
+        let entries = store.recent_audit_entries(10).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(e.request_id.as_deref(), Some("42"));
+        assert_eq!(e.tool.as_deref(), Some("rsh_exec"));
+        assert_eq!(e.raw_command.as_deref(), Some("echo hi"));
+        assert_eq!(e.wall_ms, Some(7));
+    }
+
+    #[tokio::test]
+    async fn audit_migration_is_idempotent() {
+        // Opening the store twice at the same path (simulating an upgrade of an
+        // older DB) must not error and must keep the new columns queryable.
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("migrate.db");
+        let store1 = Store::new_at_path(db_path.clone()).unwrap();
+        store1
+            .log_audit_entry("h", "echo", None, 0, "R10", true)
+            .await
+            .unwrap();
+        drop(store1);
+        // Re-open: ALTER TABLE columns already exist; migrations are no-ops.
+        let store2 = Store::new_at_path(db_path).unwrap();
+        store2
+            .log_audit(AuditRecord {
+                command_hash: "h2",
+                command_template: "ls",
+                recovery_code: "R10",
+                session_id: Some("sess-2"),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // recent_audit_entries returns newest first, but two rows inserted in the
+        // same second can tie on the second-resolution timestamp, so we assert by
+        // set membership rather than by index.
+        let entries = store2.recent_audit_entries(10).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        let session_ids: Vec<Option<String>> =
+            entries.iter().map(|e| e.session_id.clone()).collect();
+        assert!(session_ids.contains(&Some("sess-2".to_string())));
+        assert!(session_ids.contains(&None));
+    }
+
+    #[tokio::test]
+    async fn secrets_in_args_json_must_be_scrubbed_by_caller() {
+        // Documents the contract: callers scrub before passing args_json.
+        // We verify a scrubbed token round-trips verbatim and is never the raw secret.
+        let (store, _dir) = test_store();
+        // Use a realistic-length GitHub PAT (the scrubber requires 36+ chars).
+        let raw = r#"{"env":{"TOKEN":"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"}}"#;
+        let scrubbed = crate::sandbox::scrubber::scrub_secrets(raw);
+        assert!(!scrubbed.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"));
+        store
+            .log_audit(AuditRecord {
+                command_hash: "h",
+                command_template: "printenv",
+                recovery_code: "R10",
+                args_json: Some(&scrubbed),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let e = store.recent_audit_entries(1).await.unwrap().remove(0);
+        assert!(e.args_json.unwrap().contains("[REDACTED]"));
     }
 
     #[tokio::test]

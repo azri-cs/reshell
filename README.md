@@ -137,9 +137,13 @@ Execute a shell command with resilient failure handling.
   "cwd": "/tmp",
   "timeout": 120,
   "env": {},
-  "retry": true
+  "retry": true,
+  "binary_handling": "summary",
+  "approve": false
 }
 ```
+
+If a call returns `recovery_code: "R28"` (Approval Required), re-issue the **same** command with `"approve": true` after a human approves the operation (see [Optional human-in-the-loop approval](#optional-human-in-the-loop-approval-r28)).
 
 **Example Response (Success):**
 ```json
@@ -273,6 +277,24 @@ Get pattern memory statistics and runtime metrics: recovery attempts, pattern co
 
 ---
 
+## Scope & Non-Goals
+
+Reshell is a **resilient shell-execution layer**. It governs the tool-call failure modes that originate at the shell surface — opaque command failures, retry loops, output overflow, unsafe commands, runaway budgets, and unreviewed high-risk operations — and turns them into structured, recoverable events without ever calling an LLM.
+
+It is **not** a complete solution to "the AI agent tool-call problem." The following concerns are deliberately out of scope and should be handled by complementary layers (the host agent, a separate tool gateway, or OS-level isolation):
+
+| Concern | Why it's out of scope | Where it belongs |
+|---------|----------------------|------------------|
+| **Model-layer tool selection** — agents hallucinating tool names, returning empty responses, or picking the wrong tool | Reshell only structures what happens *after* a real shell command runs; it cannot influence the model's choice of tool | The model / agent runtime |
+| **Non-shell API/HTTP tool misuse** — FireCrawl, `web_search`, custom HTTP tools, authenticated API calls | Reshell is shell-execution middleware; it has no visibility into other tools' transports | A separate tool-call gateway or the host's permission layer |
+| **Cross-tool token budgeting** — per-session/hourly/daily token ceilings across *all* tools | Reshell budgets only the shell surface it controls (via `[budget]`) | The host agent's budget/guardrail layer |
+| **Full checkpoint/resume of agent execution graphs** — durable state for resuming a corrupted long run | Pattern memory persists *fixes* (command → learned correction), not the agent's execution graph | The agent framework |
+| **Per-tool least-privilege credentials for non-shell tools** (OWASP ASI02 Guidelines 1, 2, 6, 7) | Applies to API/auth tools outside the shell surface | A credentials/identity layer at the host |
+
+**What Reshell *does* own:** deterministic shell error classification (R10–R30), zero-LLM recovery strategies, learned pattern memory for recurring shell failures, output compaction (head/skeleton/diff/errors-only + JSONPath extraction), MIME-aware binary output handling, pre-exec safety validation with risk-tiered approval (`R28`), secret scrubbing on shell stderr/stdout, full-argument audit & correlation-id tracing, and per-session/hourly/daily *shell-invocation* budgeting (`R29`). For everything above, pair Reshell with the appropriate complementary layer rather than expecting it to cover the full tool-call surface.
+
+---
+
 ## CLI Usage (Direct Mode)
 
 Reshell can also be used directly from the terminal without an agent.
@@ -317,6 +339,43 @@ Commands are run as `sh -c '<command>'` by default. If `retry` is true (the defa
 
 Advanced deployments can restrict which command names are permitted by creating `~/.reshell/allowlist.toml` (blocklist remains the default if the file is missing or invalid). See comments in `src/sandbox/allowlist.rs` for the TOML shape.
 
+### Optional budget guardrail
+
+To cap how many shell calls an agent can make, add a `[budget]` section to `~/.reshell/config.toml`. All values default to `0` (unlimited), so the guardrail is inert until you set one:
+
+```toml
+[budget]
+max_invocations_per_session = 200   # calls per MCP server process; 0 = unlimited
+max_output_bytes_per_session = 10485760
+max_wall_secs_per_session = 600
+max_invocations_per_hour = 0        # persisted across restarts via budget_ledger
+max_invocations_per_day = 0
+```
+
+When a cap is reached, `rsh_exec` returns recovery code **`R29` (Budget Exhausted)** and the command is **not** executed. Session caps (invocations, bytes, wall) reset when the server restarts; hourly/daily caps persist in the SQLite `budget_ledger` table. Note: output bytes are charged *after* execution (size is unknowable in advance), so a bytes cap may refuse the *next* call rather than the one that exceeds it. The guardrail is enforced in the shared `Router`, so it applies to **both** stdio and SSE transports.
+
+### Optional human-in-the-loop approval (R28)
+
+High-risk-but-legitimate commands — recursive deletes outside `/tmp`, `git push --force`, `docker system prune`, `sudo`-bearing commands, or anything matching a configurable pattern — return **`R28` (Approval Required)** instead of executing silently. The MCP host (Claude Code / OpenCode / Cursor) intercepts the tool call for its own permission UI and, once a human approves, re-issues the same command with `approve: true`:
+
+```json
+{ "command": "git push --force origin main", "approve": true }
+```
+
+Configure the triggers in `~/.reshell/config.toml`:
+
+```toml
+[safety]
+auto_approve = false                 # if true, skip the R28 gate entirely
+review_patterns = ["git reset --hard"]   # extra regexes that trigger review
+```
+
+The built-in review triggers (on unless `auto_approve = true`): `rm -r` outside `/tmp`/`/var/tmp`, `git push --force`, `docker (system|volume) prune`, and any command containing `sudo`. Commands that are outright dangerous (`rm -rf /`, `mkfs`, fork bombs, etc.) are still hard-blocked as `R27` and never reach the approval gate.
+
+### Optional full-argument audit & tracing
+
+Every tool call is logged to the `audit_log` SQLite table with a per-process **session id**, the JSON-RPC **request id**, the (secret-scrubbed) **raw arguments**, and **wall-clock duration** — so every invocation is traceable end-to-end. The last 10 invocations surface in `rsh_stats` as `recent_invocations`. Arguments are routed through the secret scrubber before persistence, so tokens/keys in `env` or args are never written to disk. This is on by default (no config needed); the columns are additive and nullable, so older databases upgrade in place.
+
 ---
 
 ## Failure Taxonomy
@@ -332,6 +391,8 @@ Advanced deployments can restrict which command names are permitted by creating 
 | `R25` | **Environment Mismatch** | Shell mismatch | Bash-ism in Zsh |
 | `R26` | **Output Overflow** | stdout > threshold | Truncated output |
 | `R27` | **Blocked / Safety Violation** | Validator / allowlist | Dangerous pattern, interactive editor, or allowlist deny |
+| `R28` | **Approval Required** | Validator risk-tier (high-risk command) | Recursive delete outside `/tmp`, `git push --force`, `sudo`-bearing command — re-issue with `approve: true` |
+| `R29` | **Budget Exhausted** | Budget guardrail | A configured session/hourly/daily cap was reached; the command was not executed |
 | `R30` | **Fatal / Unknown** | Non-matching | Requires escalation |
 
 ---

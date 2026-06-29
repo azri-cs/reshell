@@ -154,11 +154,35 @@ impl Runner {
     pub async fn run(&self, req: &ExecRequest) -> anyhow::Result<ExecResult> {
         let execution_id = uuid::Uuid::new_v4().to_string();
         let mut persistence_warnings: Vec<String> = Vec::new();
+        let started = std::time::Instant::now();
 
         self.metrics.record_exec();
 
         // 1. Validate
         if let Err(e) = validator::validate(&req.command) {
+            // Even blocked commands get an audit row so refusals are traceable.
+            let normalized = normalize_command(&req.command);
+            let hash = hash_command(&normalized);
+            if let Err(audit_e) = self
+                .store
+                .log_audit(crate::memory::AuditRecord {
+                    command_hash: &hash,
+                    command_template: &normalized,
+                    cwd: req.cwd.as_deref(),
+                    exit_code: -1,
+                    recovery_code: "R27",
+                    validation_passed: false,
+                    session_id: req.call_ctx.as_ref().map(|c| c.session_id.as_str()),
+                    request_id: req.call_ctx.as_ref().and_then(|c| c.request_id.as_deref()),
+                    tool: Some("rsh_exec"),
+                    raw_command: Some(&req.command),
+                    args_json: req.raw_args_json.as_deref(),
+                    wall_ms: Some(started.elapsed().as_millis() as i64),
+                })
+                .await
+            {
+                persistence_warnings.push(format!("Failed to write audit log: {}", audit_e));
+            }
             return Ok(ExecResult {
                 status: "failed".to_string(),
                 recovery_code: RecoveryCode::R27.to_string(),
@@ -197,9 +221,91 @@ impl Runner {
                 }),
                 compaction_hint: None,
                 platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
-                warnings: vec![],
+                warnings: persistence_warnings,
                 auto_retry: None,
             });
+        }
+
+        // 1b. High-risk commands need explicit approval (R28). If the validator
+        // flagged this command as NeedsReview and the caller did not pass
+        // approve:true, short-circuit with a structured approval request. The
+        // MCP host (Claude Code / OpenCode) reads this and re-issues with
+        // approve:true after its own permission UI.
+        if !req.approve {
+            if let Ok(outcome) = validator::validate(&req.command) {
+                if outcome.risk_tier == validator::RiskTier::NeedsReview {
+                    let risk_factor = outcome.risk_factor.unwrap_or("high_risk");
+                    let normalized = normalize_command(&req.command);
+                    let hash = hash_command(&normalized);
+                    let review_reason = format!(
+                        "High-risk command requires human approval ({})",
+                        risk_factor
+                    );
+                    if let Err(audit_e) = self
+                        .store
+                        .log_audit(crate::memory::AuditRecord {
+                            command_hash: &hash,
+                            command_template: &normalized,
+                            cwd: req.cwd.as_deref(),
+                            exit_code: -1,
+                            recovery_code: "R28",
+                            validation_passed: true,
+                            session_id: req.call_ctx.as_ref().map(|c| c.session_id.as_str()),
+                            request_id: req.call_ctx.as_ref().and_then(|c| c.request_id.as_deref()),
+                            tool: Some("rsh_exec"),
+                            raw_command: Some(&req.command),
+                            args_json: req.raw_args_json.as_deref(),
+                            wall_ms: Some(started.elapsed().as_millis() as i64),
+                        })
+                        .await
+                    {
+                        persistence_warnings
+                            .push(format!("Failed to write audit log: {}", audit_e));
+                    }
+                    return Ok(ExecResult {
+                        status: "needs_approval".to_string(),
+                        recovery_code: RecoveryCode::R28.to_string(),
+                        recovery_class: RecoveryCode::R28.class_name().to_string(),
+                        original_command: req.command.clone(),
+                        execution_id,
+                        output_id: None,
+                        suggestion: serde_json::to_value(
+                            resolve_suggestion(
+                                &self.store,
+                                RecoveryCode::R28,
+                                &req.command,
+                                &review_reason,
+                                None,
+                                &Detector::default(),
+                            )
+                            .await?
+                            .suggestion,
+                        )?,
+                        output: OutputInfo {
+                            stdout: String::new(),
+                            stderr: format!(
+                                "rsh: approval required ({}): high-risk command '{}'",
+                                risk_factor, req.command
+                            ),
+                            exit_code: -1,
+                            truncated: false,
+                            binary_summary: None,
+                        },
+                        next_action: Some(NextAction {
+                            tool: "rsh_exec".to_string(),
+                            params: serde_json::json!({
+                                "command": req.command,
+                                "approve": true,
+                            }),
+                            reason: "Re-issue this command with approve:true after a human approves the operation.".to_string(),
+                        }),
+                        compaction_hint: None,
+                        platform: Some(crate::memory::pattern::current_platform_tag().to_string()),
+                        warnings: persistence_warnings,
+                        auto_retry: None,
+                    });
+                }
+            }
         }
 
         // 2. Execute
@@ -342,9 +448,32 @@ impl Runner {
 
         // Fast path: for simple successful commands, skip DB persistence,
         // compaction, and recovery suggestion (nothing to learn from
-        // "echo hello" succeeding).
+        // "echo hello" succeeding). Audit still records the invocation so the
+        // trace covers the whole surface (and feeds rsh_stats / budgeting).
         let is_simple = is_simple_command(&req.command);
         if classification.code == RecoveryCode::R10 && is_simple {
+            let normalized = normalize_command(&req.command);
+            let hash = hash_command(&normalized);
+            if let Err(audit_e) = self
+                .store
+                .log_audit(crate::memory::AuditRecord {
+                    command_hash: &hash,
+                    command_template: &normalized,
+                    cwd: req.cwd.as_deref(),
+                    exit_code,
+                    recovery_code: "R10",
+                    validation_passed: true,
+                    session_id: req.call_ctx.as_ref().map(|c| c.session_id.as_str()),
+                    request_id: req.call_ctx.as_ref().and_then(|c| c.request_id.as_deref()),
+                    tool: Some("rsh_exec"),
+                    raw_command: Some(&req.command),
+                    args_json: req.raw_args_json.as_deref(),
+                    wall_ms: Some(started.elapsed().as_millis() as i64),
+                })
+                .await
+            {
+                persistence_warnings.push(format!("Failed to write audit log: {}", audit_e));
+            }
             return Ok(ExecResult {
                 status: "success".to_string(),
                 recovery_code: "R10".to_string(),
@@ -368,20 +497,30 @@ impl Runner {
             });
         }
 
-        // 4b. Audit log
-        if let Err(e) = self
-            .store
-            .log_audit_entry(
-                &hash_command(&normalize_command(&req.command)),
-                &normalize_command(&req.command),
-                req.cwd.as_deref(),
-                exit_code,
-                &classification.code.to_string(),
-                true, // validation passed
-            )
-            .await
+        // 4b. Audit log (full tracing context: session/request id, raw command, scrubbed args, wall time)
         {
-            persistence_warnings.push(format!("Failed to write audit log: {}", e));
+            let normalized = normalize_command(&req.command);
+            let hash = hash_command(&normalized);
+            if let Err(e) = self
+                .store
+                .log_audit(crate::memory::AuditRecord {
+                    command_hash: &hash,
+                    command_template: &normalized,
+                    cwd: req.cwd.as_deref(),
+                    exit_code,
+                    recovery_code: &classification.code.to_string(),
+                    validation_passed: true,
+                    session_id: req.call_ctx.as_ref().map(|c| c.session_id.as_str()),
+                    request_id: req.call_ctx.as_ref().and_then(|c| c.request_id.as_deref()),
+                    tool: Some("rsh_exec"),
+                    raw_command: Some(&req.command),
+                    args_json: req.raw_args_json.as_deref(),
+                    wall_ms: Some(started.elapsed().as_millis() as i64),
+                })
+                .await
+            {
+                persistence_warnings.push(format!("Failed to write audit log: {}", e));
+            }
         }
 
         // 5. Compact output
@@ -484,6 +623,9 @@ impl Runner {
                         env: req.env.clone(),
                         retry: false,
                         binary_handling: req.binary_handling,
+                        call_ctx: None,
+                        raw_args_json: None,
+                        approve: true,
                     };
                     // Use execute_once directly (avoids recursive run() call)
                     let fix_attempt = self
@@ -718,6 +860,9 @@ mod tests {
             env: HashMap::new(),
             retry,
             binary_handling: super::BinaryHandling::Summary,
+            call_ctx: None,
+            raw_args_json: None,
+            approve: false,
         }
     }
 
@@ -802,6 +947,9 @@ mod tests {
             env: HashMap::new(),
             retry: false,
             binary_handling: super::BinaryHandling::Summary,
+            call_ctx: None,
+            raw_args_json: None,
+            approve: false,
         };
 
         let result = runner.run(&req).await.unwrap();

@@ -27,6 +27,32 @@ pub struct ExecRequest {
     pub retry: bool,
     #[serde(default)]
     pub binary_handling: BinaryHandling,
+    /// Per-call tracing context (session id, request id, scrubbed raw args).
+    /// Populated by the MCP server; absent for direct CLI invocations.
+    /// Skipped on the wire so it never appears in JSON input/output.
+    #[serde(skip)]
+    pub call_ctx: Option<ExecCallContext>,
+    /// The raw, scrubbed JSON of the original tool-call arguments, for the
+    /// audit log. Already secret-scrubbed by the caller before being set.
+    #[serde(skip)]
+    pub raw_args_json: Option<String>,
+    /// Human approval for a high-risk command (R28). Set to true by the agent
+    /// after the host's permission UI confirms; lets the command through the
+    /// validator's risk-tier check. Skipped on the wire (the wrapper reads it).
+    #[serde(skip, default)]
+    pub approve: bool,
+}
+
+/// Tracing context attached to an `ExecRequest` so audit rows can correlate
+/// an execution back to the MCP session and JSON-RPC request that caused it.
+/// Kept minimal and free of MCP-specific types so `exec` does not depend on
+/// the `mcp` module.
+#[derive(Debug, Clone)]
+pub struct ExecCallContext {
+    /// One per server process — the cross-request correlation id.
+    pub session_id: String,
+    /// The JSON-RPC request id (stringified).
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

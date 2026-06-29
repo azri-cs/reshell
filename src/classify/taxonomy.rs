@@ -12,6 +12,12 @@ pub enum RecoveryCode {
     R25,
     R26,
     R27,
+    /// High-risk-but-not-blocked command awaiting human sign-off.
+    /// Produced by the validator's risk-tier check, not by `classify()`.
+    R28,
+    /// A configured shell-invocation budget cap (session/hourly/daily) was hit.
+    /// Produced by the budget guard at the top of `rsh_exec`, not by `classify()`.
+    R29,
     R30,
 }
 
@@ -27,6 +33,8 @@ impl RecoveryCode {
             RecoveryCode::R25 => "Environment Mismatch",
             RecoveryCode::R26 => "Output Overflow",
             RecoveryCode::R27 => "Blocked / Safety Violation",
+            RecoveryCode::R28 => "Approval Required",
+            RecoveryCode::R29 => "Budget Exhausted",
             RecoveryCode::R30 => "Fatal / Unknown",
         }
     }

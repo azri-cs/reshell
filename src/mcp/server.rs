@@ -192,7 +192,3 @@ impl McpServer {
         Ok(())
     }
 }
-
-// Re-export for backward compatibility with callers that expect McpServer::new().
-#[allow(unused_imports)]
-use super::router::ServerState as _ServerStateReexport;
