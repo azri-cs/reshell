@@ -727,6 +727,163 @@ async fn test_mcp_budget_unlimited_by_default() {
     let _ = child.kill().await;
 }
 
+// ── SSE transport: budget guardrail must enforce on SSE too ──────────
+//
+// The budget counters live in the shared Router's ServerState (not stdio-only),
+// so the same cap that blocks a stdio call must block an SSE call. This test
+// drives the real HTTP/SSE protocol: open the SSE stream, POST JSON-RPC
+// messages, and read responses back over the SSE channel.
+
+/// Read raw SSE events from a stream until we collect one whose `data:` payload
+/// parses as a JSON-RPC response with the given id. Returns that response.
+async fn read_sse_response(
+    reader: &mut BufReader<tokio::net::TcpStream>,
+    want_id: &serde_json::Value,
+) -> Value {
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf).await.expect("SSE read");
+        if n == 0 {
+            panic!("SSE stream closed before response for id {:?}", want_id);
+        }
+        // SSE data lines look like: `data: { ... }\n`
+        if let Some(rest) = buf.strip_prefix("data: ") {
+            let trimmed = rest.trim();
+            if trimmed.starts_with('{') {
+                if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                    if v.get("id") == Some(want_id) {
+                        return v;
+                    }
+                }
+            }
+        }
+        // Other lines (event: endpoint, blank separators, notifications) are skipped.
+    }
+}
+
+/// POST a JSON-RPC request to the SSE messages endpoint. The HTTP response is
+/// 202 Accepted (per MCP SSE spec); the actual result comes back over the SSE
+/// stream, which the caller reads separately.
+async fn post_sse_message(addr: std::net::SocketAddr, session_id: &str, body: &Value) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let body_str = serde_json::to_string(body).unwrap();
+    let request = format!(
+        "POST /mcp/messages?session_id={} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        session_id,
+        body_str.len(),
+        body_str
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    // Drain the 202 response so the kernel doesn't wedge the connection.
+    let mut sink = vec![0u8; 1024];
+    let _ = stream.read(&mut sink).await;
+}
+
+#[tokio::test]
+async fn test_sse_transport_enforces_budget_cap() {
+    // Configure a 2-call session cap, same as the stdio test, but exercise it
+    // over the HTTP/SSE transport to prove the guardrail is transport-agnostic.
+    let home = unique_home_dir();
+    let cfg_dir = home.join(".reshell");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        "[budget]\nmax_invocations_per_session = 2\n",
+    )
+    .unwrap();
+
+    // Pick a free port by binding to :0, reading the assigned port, then dropping.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let mut child = Command::new(rsh_bin())
+        .args(["mcp", "--transport", "sse", "--port", &port.to_string()])
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Failed to spawn SSE server");
+
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+
+    // Retry-connect until the server is up (it binds asynchronously).
+    let mut connected = None;
+    for _ in 0..50 {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(s) => {
+                connected = Some(s);
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+        }
+    }
+    let mut sse_stream = connected.expect("SSE server did not come up in time");
+
+    // Send GET /mcp/sse to open the session.
+    let get_req = "GET /mcp/sse HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n";
+    sse_stream.write_all(get_req.as_bytes()).await.unwrap();
+
+    let mut reader = BufReader::new(sse_stream);
+
+    // The first thing the server sends is the HTTP response headers, then the
+    // SSE stream. Read lines until we find the `endpoint` event's data line,
+    // which carries the session_id we POST to.
+    let mut session_id = String::new();
+    let mut line = String::new();
+    // Read up to ~40 lines looking for the endpoint; skip HTTP headers + blanks.
+    for _ in 0..200 {
+        line.clear();
+        if reader.read_line(&mut line).await.unwrap() == 0 {
+            break;
+        }
+        if line.starts_with("data: /mcp/messages?session_id=") {
+            session_id = line
+                .trim()
+                .trim_start_matches("data: /mcp/messages?session_id=")
+                .trim()
+                .to_string();
+            break;
+        }
+    }
+    assert!(
+        !session_id.is_empty(),
+        "never received SSE endpoint session id"
+    );
+
+    // Two calls should succeed.
+    for i in 1..=2 {
+        let req = json!({"jsonrpc":"2.0","id":i,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo ok"}}});
+        post_sse_message(addr, &session_id, &req).await;
+        let resp = read_sse_response(&mut reader, &json!(i)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let r: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(r["status"], "success", "first two SSE calls should succeed");
+    }
+
+    // Third call is refused with R29 over SSE.
+    let req = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rsh_exec","arguments":{"command":"echo blocked"}}});
+    post_sse_message(addr, &session_id, &req).await;
+    let resp = read_sse_response(&mut reader, &json!(3)).await;
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let r: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(r["status"], "failed");
+    assert_eq!(
+        r["recovery_code"], "R29",
+        "budget cap must enforce on the SSE transport too"
+    );
+
+    let _ = child.kill().await;
+}
+
 #[tokio::test]
 async fn test_mcp_high_risk_command_needs_approval_then_runs() {
     // A high-risk command (git push --force) returns R28 without approve:true.
